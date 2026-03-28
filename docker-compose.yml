@@ -1,0 +1,50 @@
+# Person Identification Service – Docker Compose
+#
+# GPU-accelerated face recognition microservice.
+#
+# Usage:
+#   docker compose up -d
+#
+# Configuration is driven entirely by config/settings.yaml.
+# Override individual settings at runtime via environment variables —
+# each setting that supports override is documented with its env var name
+# in config/settings.yaml.
+#
+# Requires: NVIDIA Container Toolkit (nvidia-ctk)
+
+services:
+  person-id:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: person-id
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      - person-id-data:/app/data
+    # Uncomment and adjust to override settings.yaml values at runtime.
+    # See config/settings.yaml for the full list of supported env vars.
+    # environment:
+    #   CUDA_DEVICE_ID: "0"            # GPU device index (-1 for CPU)
+    #   PERSON_ID_MODEL: "buffalo_l"   # buffalo_l (accurate) or buffalo_s (faster)
+    #   DETECTION_THRESHOLD: "0.5"
+    #   RECOGNITION_THRESHOLD: "0.4"
+    #   LOG_LEVEL: "INFO"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  person-id-data:
+    driver: local

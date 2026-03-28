@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+data/embeddings/
+data/face_db.sqlite
+.env
+*.egg-info/
+dist/
+build/
