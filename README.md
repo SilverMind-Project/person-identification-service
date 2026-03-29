@@ -36,7 +36,7 @@ curl http://localhost:8100/health
 docker compose up -d
 ```
 
-Configuration is driven by `config/settings.yaml`. Override individual values via environment variables — see the commented `environment:` block in `docker-compose.yml` for the full list.
+Configuration is driven by `config/settings.yaml`. Override individual values via environment variables  -  see the commented `environment:` block in `docker-compose.yml` for the full list.
 
 ### Local Development
 
@@ -59,7 +59,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
 
 ## Configuration
 
-All settings live in `config/settings.yaml`. Values marked with `${VAR:default}` can be overridden at runtime by setting the named environment variable — no file edits required.
+All settings live in `config/settings.yaml`. Values marked with `${VAR:default}` can be overridden at runtime by setting the named environment variable  -  no file edits required.
 
 | Env var | settings.yaml key | Default | Description |
 | --- | --- | --- | --- |
@@ -448,9 +448,9 @@ Mount the `data/` directory as a persistent volume to retain enrollment and gues
 If recognition accuracy is low for a specific person:
 
 1. **Add more reference photos** via the enrollment endpoint (different angles, lighting)
-2. **Lower the recognition threshold** via `RECOGNITION_THRESHOLD` env var or `recognition.threshold` in `config/settings.yaml` (e.g., `0.35`) — increases true positives but may increase false positives
-3. **Use photos from the actual cameras** — domain-matched images work best
-4. **Check face visibility** — ensure cameras capture faces clearly (adequate lighting, appropriate angle)
+2. **Lower the recognition threshold** via `RECOGNITION_THRESHOLD` env var or `recognition.threshold` in `config/settings.yaml` (e.g., `0.35`)  -  increases true positives but may increase false positives
+3. **Use photos from the actual cameras**  -  domain-matched images work best
+4. **Check face visibility**  -  ensure cameras capture faces clearly (adequate lighting, appropriate angle)
 
 ## Kubernetes Deployment
 
