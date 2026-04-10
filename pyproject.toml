@@ -8,7 +8,8 @@ license = "AGPL-3.0"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "insightface>=0.7.3",
+    "insightface==0.7.3",
+    "scikit-image<0.26.0",
     "onnxruntime-gpu @ https://github.com/ultralytics/assets/releases/download/v0.0.0/onnxruntime_gpu-1.24.0-cp312-cp312-linux_aarch64.whl",
     "opencv-python-headless>=4.9",
     "numpy>=1.26",
