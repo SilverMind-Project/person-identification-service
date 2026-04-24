@@ -7,3 +7,7 @@ data/face_db.sqlite
 *.egg-info/
 dist/
 build/
+.vscode/
+.claude/
+.qwen/
+.kiro/
