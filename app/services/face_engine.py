@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 
 import cv2
+import insightface
 import numpy as np
 
 from app import config
@@ -25,7 +26,6 @@ class FaceEngine:
     """Wraps InsightFace's FaceAnalysis for detection + embedding extraction."""
 
     def __init__(self) -> None:
-        import insightface
 
         model_name = config.get("face_engine.model_name", "buffalo_l")
         model_root = config.get("face_engine.model_root", "data/models")

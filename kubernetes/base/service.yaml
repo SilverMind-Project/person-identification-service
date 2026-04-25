@@ -10,6 +10,6 @@ spec:
     app: person-id
   ports:
   - name: http
-    port: 8100
-    targetPort: 8100
+    port: 8200
+    targetPort: 8200
     protocol: TCP

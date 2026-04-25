@@ -24,10 +24,10 @@ GPU-accelerated face recognition and motion direction detection service for the 
 docker build -t person-id-service .
 
 # Run with GPU access and persistent data volume
-docker run --gpus all -p 8100:8100 -v $(pwd)/data:/app/data person-id-service
+docker run --gpus all -p 8200:8200 -v $(pwd)/data:/app/data person-id-service
 
 # Verify
-curl http://localhost:8100/health
+curl http://localhost:8200/health
 ```
 
 ### Docker Compose
@@ -54,7 +54,7 @@ uv sync
 uv sync --extra cpu
 
 # Run
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 ```
 
 ## Configuration
@@ -120,7 +120,7 @@ Full CRUD operations for managing enrolled household members. No model fine-tuni
 Returns all enrolled household members with their metadata.
 
 ```bash
-curl http://localhost:8100/api/v1/members
+curl http://localhost:8200/api/v1/members
 ```
 
 Response:
@@ -152,7 +152,7 @@ Response:
 Returns details for a specific enrolled member. Returns 404 if the member does not exist.
 
 ```bash
-curl http://localhost:8100/api/v1/members/grandma
+curl http://localhost:8200/api/v1/members/grandma
 ```
 
 Response:
@@ -179,7 +179,7 @@ IMG2=$(base64 -w0 grandma_photo2.jpg)
 IMG3=$(base64 -w0 grandma_photo3.jpg)
 
 # Enroll
-curl -X POST http://localhost:8100/api/v1/enroll \
+curl -X POST http://localhost:8200/api/v1/enroll \
   -H "Content-Type: application/json" \
   -d "{
     \"person_id\": \"grandma\",
@@ -217,7 +217,7 @@ The `status` field will be `"enrolled"` for new members or `"updated"` when addi
 A convenience endpoint for enrolling via multipart file upload, useful with curl or admin tools. Behaves identically to the base64 endpoint in terms of enrollment logic.
 
 ```bash
-curl -X POST http://localhost:8100/api/v1/enroll/upload/grandma \
+curl -X POST http://localhost:8200/api/v1/enroll/upload/grandma \
   -F "name=Grandma" \
   -F "files=@grandma_photo1.jpg" \
   -F "files=@grandma_photo2.jpg" \
@@ -241,7 +241,7 @@ To improve recognition accuracy, call either enroll endpoint again with the same
 IMG4=$(base64 -w0 grandma_photo4.jpg)
 IMG5=$(base64 -w0 grandma_photo5.jpg)
 
-curl -X POST http://localhost:8100/api/v1/enroll \
+curl -X POST http://localhost:8200/api/v1/enroll \
   -H "Content-Type: application/json" \
   -d "{
     \"person_id\": \"grandma\",
@@ -257,7 +257,7 @@ curl -X POST http://localhost:8100/api/v1/enroll \
 Permanently removes an enrolled member and all their stored embeddings (individual embeddings and centroid). Returns 404 if the member does not exist.
 
 ```bash
-curl -X DELETE http://localhost:8100/api/v1/members/grandma
+curl -X DELETE http://localhost:8200/api/v1/members/grandma
 ```
 
 Response:
@@ -276,7 +276,7 @@ Response:
 ```bash
 IMG=$(base64 -w0 camera_snapshot.jpg)
 
-curl -X POST http://localhost:8100/api/v1/identify \
+curl -X POST http://localhost:8200/api/v1/identify \
   -H "Content-Type: application/json" \
   -d "{\"image\": \"$IMG\"}"
 ```
@@ -302,7 +302,7 @@ Response:
 Set `include_annotated_image: true` to receive the image back with bounding boxes and name labels drawn on it. Known persons are drawn in green, unknown in orange.
 
 ```bash
-curl -X POST http://localhost:8100/api/v1/identify \
+curl -X POST http://localhost:8200/api/v1/identify \
   -H "Content-Type: application/json" \
   -d "{\"image\": \"$IMG\", \"include_annotated_image\": true}"
 ```
@@ -318,7 +318,7 @@ IMG1=$(base64 -w0 frame_001.jpg)
 IMG2=$(base64 -w0 frame_002.jpg)
 IMG3=$(base64 -w0 frame_003.jpg)
 
-curl -X POST http://localhost:8100/api/v1/identify-batch \
+curl -X POST http://localhost:8200/api/v1/identify-batch \
   -H "Content-Type: application/json" \
   -d "{
     \"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"],
@@ -346,7 +346,7 @@ Response:
 ### Motion Direction Only
 
 ```bash
-curl -X POST http://localhost:8100/api/v1/detect-motion \
+curl -X POST http://localhost:8200/api/v1/detect-motion \
   -H "Content-Type: application/json" \
   -d "{\"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"]}"
 ```
@@ -386,12 +386,12 @@ Both `/identify` and `/identify-batch` endpoints accept a `save_guest_images` fl
 
 ```bash
 # Single image - save if guests detected
-curl -X POST http://localhost:8100/api/v1/identify \
+curl -X POST http://localhost:8200/api/v1/identify \
   -H "Content-Type: application/json" \
   -d "{\"image\": \"$IMG\", \"save_guest_images\": true}"
 
 # Batch - save frames containing guests
-curl -X POST http://localhost:8100/api/v1/identify-batch \
+curl -X POST http://localhost:8200/api/v1/identify-batch \
   -H "Content-Type: application/json" \
   -d "{
     \"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"],
@@ -460,10 +460,10 @@ Kubernetes manifests are in `kubernetes/`:
 kubernetes/
 ├── base/                  # Environment-agnostic manifests
 │   ├── deployment.yaml    # GPU deployment (nvidia.com/gpu: 1)
-│   ├── service.yaml       # ClusterIP on port 8100
+│   ├── service.yaml       # ClusterIP on port 8200
 │   └── pvc.yaml           # 5 Gi persistent volume for data/
 └── local/                 # Local cluster overlay
     └── deployment.yaml    # localhost:32000 registry image
 ```
 
-The service is deployed as `person-id-svc` on port 8100 and is accessed by the Cognitive Companion backend via `PERSON_ID_SERVICE_URL`.
+The service is deployed as `person-id-svc` on port 8200 and is accessed by the Cognitive Companion backend via `PERSON_ID_SERVICE_URL`.

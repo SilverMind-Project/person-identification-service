@@ -8,7 +8,7 @@ GPU-accelerated face recognition and motion direction detection microservice for
 
 ```bash
 # Run (development)
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 
 # GPU build (default)
 uv sync
@@ -30,7 +30,7 @@ uv run pytest
 
 # Docker
 docker build -t person-id-service .
-docker run --gpus all -p 8100:8100 -v $(pwd)/data:/app/data person-id-service
+docker run --gpus all -p 8200:8200 -v $(pwd)/data:/app/data person-id-service
 
 # Docker Compose
 docker compose up -d

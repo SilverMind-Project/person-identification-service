@@ -20,7 +20,7 @@ spec:
         image: localhost:32000/person-id:latest
         imagePullPolicy: Always
         ports:
-        - containerPort: 8100
+        - containerPort: 8200
           name: http
         env:
         - name: CUDA_DEVICE_ID
@@ -40,14 +40,14 @@ spec:
         readinessProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8200
           initialDelaySeconds: 30
           periodSeconds: 15
           timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health
-            port: 8100
+            port: 8200
           initialDelaySeconds: 60
           periodSeconds: 30
           timeoutSeconds: 10
