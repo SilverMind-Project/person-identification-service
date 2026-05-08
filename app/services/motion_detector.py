@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-import numpy as np
-
 from app import config
-from app.services.face_engine import DetectedFace, FaceEngine, IdentifyResult
+from app.services.face_engine import FaceEngine
+from app.services.face_models import DetectedFace, IdentifyResult
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +59,10 @@ class MotionDetector:
         # Build person tracks: person_id -> list of (frame_idx, identity, face)
         tracks: dict[str, list[tuple[int, IdentifyResult, DetectedFace]]] = {}
 
-        for frame_idx, (faces, identities) in enumerate(zip(frame_faces, frame_identities)):
-            for face, identity in zip(faces, identities):
+        for frame_idx, (faces, identities) in enumerate(
+            zip(frame_faces, frame_identities, strict=True)
+        ):
+            for face, identity in zip(faces, identities, strict=True):
                 pid = identity.person_id
                 tracks.setdefault(pid, []).append((frame_idx, identity, face))
 
@@ -81,7 +82,7 @@ class MotionDetector:
             entries.sort(key=lambda e: e[0])  # sort by frame index
 
             trajectory: list[TrackPoint] = []
-            for _, identity, face in entries:
+            for _, _identity, face in entries:
                 x1, y1, x2, y2 = face.bbox
                 w = x2 - x1
                 h = y2 - y1
@@ -123,7 +124,7 @@ class MotionDetector:
         if len(trajectory) < 2:
             return "stationary", 0.0
 
-        frame_h, frame_w = frame_shape
+        _frame_h, frame_w = frame_shape
 
         first = trajectory[0]
         last = trajectory[-1]
@@ -180,7 +181,7 @@ class MotionDetector:
         tracks: list[list[tuple[int, IdentifyResult, DetectedFace]]] = []
 
         for entry in entries:
-            frame_idx, identity, face = entry
+            _frame_idx, _identity, face = entry
             matched = False
             for track in tracks:
                 # Compare with the last face in this track
@@ -193,8 +194,4 @@ class MotionDetector:
             if not matched:
                 tracks.append([entry])
 
-        return {
-            f"unknown_{i}": track
-            for i, track in enumerate(tracks)
-            if len(track) >= 2
-        }
+        return {f"unknown_{i}": track for i, track in enumerate(tracks) if len(track) >= 2}

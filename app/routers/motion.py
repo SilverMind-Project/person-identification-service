@@ -25,9 +25,9 @@ async def detect_motion(request: Request, body: MotionDetectionRequest):
     store = request.app.state.enrollment_store
     motion_detector = request.app.state.motion_detector
 
-    all_faces = []
-    all_identities = []
-    frame_shapes = []
+    all_faces: list[list] = []
+    all_identities: list[list] = []
+    frame_shapes: list[tuple[int, int]] = []
 
     for idx, b64_image in enumerate(body.images):
         try:
@@ -41,7 +41,7 @@ async def detect_motion(request: Request, body: MotionDetectionRequest):
 
         frame_shapes.append((image.shape[0], image.shape[1]))
         faces = engine.detect_faces(image)
-        identities = store.identify_all(faces)
+        identities = await store.identify_all(faces)
         all_faces.append(faces)
         all_identities.append(identities)
 

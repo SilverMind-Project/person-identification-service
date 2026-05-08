@@ -3,23 +3,15 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import cv2
 import insightface
 import numpy as np
 
 from app import config
+from app.services.face_models import DetectedFace
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DetectedFace:
-    bbox: list[float]  # [x1, y1, x2, y2]
-    embedding: np.ndarray  # 512-dim ArcFace embedding
-    det_score: float  # detection confidence
-    landmarks: np.ndarray | None = None
 
 
 class FaceEngine:
@@ -27,15 +19,21 @@ class FaceEngine:
 
     def __init__(self) -> None:
 
-        model_name = config.get("face_engine.model_name", "buffalo_l")
-        model_root = config.get("face_engine.model_root", "data/models")
-        ctx_id = int(config.get("face_engine.ctx_id", 0))
+        model_name = config.get("face_engine.model_name")
+        model_root = config.get("face_engine.model_root")
+        ctx_id = int(config.get("face_engine.ctx_id"))
         det_size_cfg = config.get("face_engine.det_size", [640, 640])
         det_size = tuple(det_size_cfg) if isinstance(det_size_cfg, list) else (640, 640)
-        self._det_threshold = float(config.get("face_engine.det_threshold", 0.5))
+        self._det_threshold = float(config.get("face_engine.det_threshold"))
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        logger.info("Initializing FaceAnalysis: model=%s root=%s ctx_id=%d det_size=%s", model_name, model_root, ctx_id, det_size)
+        providers = ["CUDAExecutionProvider"]
+        logger.info(
+            "Initializing FaceAnalysis: model=%s root=%s ctx_id=%d det_size=%s",
+            model_name,
+            model_root,
+            ctx_id,
+            det_size,
+        )
 
         self._app = insightface.app.FaceAnalysis(
             name=model_name,
@@ -49,6 +47,7 @@ class FaceEngine:
         # expose provider names, so check via onnxruntime directly.
         try:
             import onnxruntime as ort
+
             self.gpu_available = "CUDAExecutionProvider" in ort.get_available_providers()
         except Exception:
             self.gpu_available = False
@@ -83,14 +82,6 @@ class FaceEngine:
     def compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
         """Cosine similarity between two normalized embeddings."""
         return float(np.dot(emb1, emb2))
-
-
-@dataclass
-class IdentifyResult:
-    person_id: str
-    name: str
-    confidence: float  # cosine similarity to best match
-    bbox: list[float]
 
 
 def decode_base64_image(b64_str: str) -> np.ndarray:

@@ -14,6 +14,6 @@ async def health(request: Request):
     return {
         "status": "ok",
         "gpu_available": engine.gpu_available,
-        "enrolled_members": store.member_count,
+        "enrolled_members": await store.member_count(),
         "model": config.get("face_engine.model_name", "buffalo_l"),
     }

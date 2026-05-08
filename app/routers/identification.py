@@ -6,6 +6,7 @@ import base64
 import logging
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, Request
 
 from app.models.identification import (
@@ -38,14 +39,14 @@ async def identify(request: Request, body: IdentifyRequest):
 
     image = decode_base64_image(body.image)
     faces = engine.detect_faces(image)
-    identities = store.identify_all(faces)
+    identities = await store.identify_all(faces)
 
     # Save the full image if any unidentified guests are present
     if body.save_guest_images:
         guest_count = sum(1 for r in identities if r.person_id == "unknown")
         if guest_count > 0:
             guest_store = request.app.state.guest_store
-            guest_store.save_guest_image(image, guest_count=guest_count)
+            await guest_store.save_guest_image(image, guest_count=guest_count)
 
     annotated_b64 = None
     if body.include_annotated_image and identities:
@@ -78,10 +79,10 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
     motion_detector = request.app.state.motion_detector
 
     frames: list[FrameResult] = []
-    all_faces = []
-    all_identities = []
-    frame_shapes = []
-    decoded_images = []
+    all_faces: list[list] = []
+    all_identities: list[list] = []
+    frame_shapes: list[tuple[int, int]] = []
+    decoded_images: list[np.ndarray | None] = []
 
     for idx, b64_image in enumerate(body.images):
         try:
@@ -98,7 +99,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
         decoded_images.append(image)
         frame_shapes.append((image.shape[0], image.shape[1]))
         faces = engine.detect_faces(image)
-        identities = store.identify_all(faces)
+        identities = await store.identify_all(faces)
         all_faces.append(faces)
         all_identities.append(identities)
 
@@ -107,7 +108,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
             guest_count = sum(1 for r in identities if r.person_id == "unknown")
             if guest_count > 0:
                 guest_store = request.app.state.guest_store
-                guest_store.save_guest_image(image, guest_count=guest_count, frame_index=idx)
+                await guest_store.save_guest_image(image, guest_count=guest_count, frame_index=idx)
 
         frames.append(
             FrameResult(
@@ -146,16 +147,16 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
     annotated_images: list[str] | None = None
     if body.include_annotated_image:
         annotated_images = []
-        for idx, image in enumerate(decoded_images):
-            if image is None:
+        for idx, decoded in enumerate(decoded_images):
+            if decoded is None:
                 annotated_images.append("")
                 continue
             identities = all_identities[idx] if idx < len(all_identities) else []
             if identities:
-                annotated = annotate_image(image, identities)
+                annotated = annotate_image(decoded, identities)
                 annotated_images.append(_encode_image_to_base64(annotated))
             else:
-                annotated_images.append(_encode_image_to_base64(image))
+                annotated_images.append(_encode_image_to_base64(decoded))
 
     return BatchIdentifyResponse(
         frames=frames,

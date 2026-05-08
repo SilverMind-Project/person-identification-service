@@ -17,10 +17,12 @@ _settings: dict[str, Any] | None = None
 
 def _interpolate(value: Any) -> Any:
     if isinstance(value, str):
+
         def _replace(m: re.Match) -> str:
             env_var = m.group(1)
             default = m.group(2)
             return os.environ.get(env_var, default if default is not None else m.group(0))
+
         return _ENV_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _interpolate(v) for k, v in value.items()}

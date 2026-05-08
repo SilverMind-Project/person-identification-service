@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from app.models.enrollment import EnrollRequest, EnrollResult, MemberInfo, MemberListResponse
 from app.services.face_engine import decode_base64_image
@@ -29,7 +29,7 @@ async def enroll(request: Request, body: EnrollRequest):
     if not images:
         raise HTTPException(status_code=400, detail="No valid images provided")
 
-    result = store.enroll(body.person_id, body.name, images)
+    result = await store.enroll(body.person_id, body.name, images)
     if result.status == "failed":
         raise HTTPException(
             status_code=422,
@@ -60,11 +60,9 @@ async def enroll_upload(
     if not images:
         raise HTTPException(status_code=400, detail="No valid image files provided")
 
-    result = store.enroll(person_id, name, images)
+    result = await store.enroll(person_id, name, images)
     if result.status == "failed":
-        raise HTTPException(
-            status_code=422, detail="No faces detected in any uploaded images"
-        )
+        raise HTTPException(status_code=422, detail="No faces detected in any uploaded images")
     return result
 
 
@@ -72,7 +70,7 @@ async def enroll_upload(
 async def list_members(request: Request):
     """List all enrolled household members."""
     store = request.app.state.enrollment_store
-    members = store.list_members()
+    members = await store.list_members()
     return MemberListResponse(members=members, total=len(members))
 
 
@@ -80,7 +78,7 @@ async def list_members(request: Request):
 async def get_member(request: Request, person_id: str):
     """Get details of a specific enrolled member."""
     store = request.app.state.enrollment_store
-    member = store.get_member(person_id)
+    member = await store.get_member(person_id)
     if not member:
         raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
     return member
@@ -90,6 +88,6 @@ async def get_member(request: Request, person_id: str):
 async def delete_member(request: Request, person_id: str):
     """Remove an enrolled member and all their embeddings."""
     store = request.app.state.enrollment_store
-    if not store.remove_member(person_id):
+    if not await store.remove_member(person_id):
         raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
     return {"deleted": True, "person_id": person_id}

@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from app import config
-from app.services.face_engine import IdentifyResult
+from app.services.face_models import IdentifyResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +43,7 @@ def annotate_image(
     annotated = image.copy()
 
     for ident in identities:
-        is_known = not (
-            ident.person_id == "unknown" or ident.person_id.startswith("unknown_")
-        )
+        is_known = not (ident.person_id == "unknown" or ident.person_id.startswith("unknown_"))
         color = _BOX_COLOR_KNOWN if is_known else _BOX_COLOR_UNKNOWN
 
         x1, y1, x2, y2 = [int(c) for c in ident.bbox]

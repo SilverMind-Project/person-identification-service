@@ -53,9 +53,8 @@ WORKDIR /app
 COPY app/ app/
 COPY config/ config/
 
-RUN mkdir -p data/embeddings data/models
-
-VOLUME ["/app/data"]
+RUN mkdir -p data/models
+COPY data/models/ data/models/
 
 EXPOSE 8200
 

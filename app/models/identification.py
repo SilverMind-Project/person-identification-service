@@ -30,7 +30,9 @@ class IdentifyResponse(BaseModel):
 
 
 class BatchIdentifyRequest(BaseModel):
-    images: list[str] = Field(..., min_length=1, description="Ordered list of base64-encoded images")
+    images: list[str] = Field(
+        ..., min_length=1, description="Ordered list of base64-encoded images"
+    )
     include_motion: bool = Field(default=True, description="Compute motion direction across frames")
     include_annotated_image: bool = Field(
         default=False, description="Return annotated images with bounding boxes and labels"

@@ -20,18 +20,18 @@ server:
 face_engine:
   # InsightFace model pack. buffalo_l = accurate, buffalo_s = faster.
   # Override: PERSON_ID_MODEL=buffalo_s
-  model_name: "${PERSON_ID_MODEL:buffalo_l}"
+  model_name: "buffalo_l"
   # Directory for cached InsightFace model files.
   # Lives under /app/data so it persists across container restarts.
   model_root: "data/models"
   # GPU device index. 0 = first GPU, -1 = CPU fallback.
   # Override: CUDA_DEVICE_ID=-1
-  ctx_id: "${CUDA_DEVICE_ID:0}"
+  ctx_id: 0
   # Detection input size [width, height]. Larger = more accurate but slower.
   det_size: [640, 640]
   # Minimum face detection confidence (0.0 - 1.0).
   # Override: DETECTION_THRESHOLD=0.6
-  det_threshold: "${DETECTION_THRESHOLD:0.5}"
+  det_threshold: 0.6
 
 # Recognition / identification
 recognition:
@@ -49,11 +49,18 @@ motion:
   # Minimum cosine similarity to consider the same unknown person across frames.
   cross_frame_similarity: 0.5
 
-# Enrollment storage
-storage:
-  db_path: "data/face_db.sqlite"
-  embeddings_dir: "data/embeddings"
-  guest_images_dir: "data/guests"
+# PostgreSQL database (shared TimescaleDB instance)
+database:
+  # Connection string: postgresql://{user}:{password}@{host}:{port}/{db}
+  dsn: "${DATABASE_URL:postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification}"
+
+# MinIO / S3-compatible object storage for guest images
+minio:
+  endpoint: "${MINIO_ENDPOINT:localhost:9000}"
+  access_key: "${MINIO_ACCESS_KEY:minioadmin}"
+  secret_key: "${MINIO_SECRET_KEY:minioadmin}"
+  bucket: "${MINIO_BUCKET:cognitive-companion}"
+  secure: false
 
 # Image annotation (bounding boxes + labels)
 annotation:

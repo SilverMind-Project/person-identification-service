@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 
 
 class EnrollRequest(BaseModel):
-    person_id: str = Field(..., min_length=1, max_length=64, description="Unique identifier for the person")
+    person_id: str = Field(
+        ..., min_length=1, max_length=64, description="Unique identifier for the person"
+    )
     name: str = Field(..., min_length=1, max_length=128, description="Display name")
     images: list[str] = Field(
         ...,
