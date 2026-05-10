@@ -34,16 +34,21 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Person Identification Service")
 
     # Database pool
-    dsn = config.get(
-        "database.dsn", "postgresql://cc_user:change-me@localhost:5432/cognitive_companion"
-    )
+    dsn = config.get("database.dsn")
+    if not dsn:
+        raise RuntimeError(
+            "database.dsn is not configured. "
+            "Set DATABASE_URL in the environment (e.g. postgresql://user:pass@host:5432/person_identification)."
+        )
     pool = await _init_pool(dsn)
     logger.info("Database pool created")
 
-    # Ensure schema (idempotent DDL)
-    from app.services.enrollment_store import ensure_schema
+    # Run migrations (idempotent — safe for fresh and existing databases)
+    from app.db.migrate import run_migrations
 
-    await ensure_schema(pool)
+    applied = await run_migrations(pool)
+    if applied:
+        logger.info("Database migrations applied count=%d", applied)
 
     # MinIO client for guest images
     from app.services.minio_client import create_minio_client

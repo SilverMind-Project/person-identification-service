@@ -6,7 +6,7 @@
 #   docker compose up -d
 #
 # Prerequisites:
-#   - Shared PostgreSQL database (cd ../db && docker compose up -d)
+#   - Shared PostgreSQL:  cd ../db && docker compose up -d
 #   - MinIO object storage (external, reachable at MINIO_ENDPOINT)
 #   - NVIDIA Container Toolkit (nvidia-ctk)
 #
@@ -27,7 +27,7 @@ services:
     ports:
       - "8200:8200"
     environment:
-      DATABASE_URL: "${DATABASE_URL}"
+      DATABASE_URL: "postgresql://${PID_DB_USER:-pid_user}:${PID_DB_PASSWORD:?err}@postgres:5432/person_identification"
       MINIO_ENDPOINT: "${MINIO_ENDPOINT}"
       MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY}"
       MINIO_SECRET_KEY: "${MINIO_SECRET_KEY}"

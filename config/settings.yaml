@@ -50,9 +50,9 @@ motion:
   cross_frame_similarity: 0.5
 
 # PostgreSQL database (shared TimescaleDB instance)
+# Must be set via DATABASE_URL environment variable — no default credentials.
 database:
-  # Connection string: postgresql://{user}:{password}@{host}:{port}/{db}
-  dsn: "${DATABASE_URL:postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification}"
+  dsn: "${DATABASE_URL}"
 
 # MinIO / S3-compatible object storage for guest images
 minio:
