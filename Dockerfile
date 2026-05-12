@@ -52,6 +52,7 @@ WORKDIR /app
 
 COPY app/ app/
 COPY config/ config/
+COPY migrations/ migrations/
 
 RUN mkdir -p data/models
 COPY data/models/ data/models/
