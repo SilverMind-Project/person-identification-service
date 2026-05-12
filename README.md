@@ -1,6 +1,10 @@
 # Person Identification Service
 
-GPU-accelerated face recognition and motion direction detection service for the Cognitive Companion system. Identifies household members in camera images and detects direction of movement at doorways.
+GPU-accelerated face recognition and motion direction detection microservice for the [Cognitive Companion](https://silvermind-project.github.io) system. Identifies household members in camera images and detects movement direction at doorways.
+
+Documentation: [silvermind-project.github.io](https://silvermind-project.github.io). Agent reference: [AGENTS.md](AGENTS.md). Agent quick-start: [CLAUDE.md](CLAUDE.md).
+
+---
 
 ## Architecture
 
@@ -8,12 +12,30 @@ GPU-accelerated face recognition and motion direction detection service for the 
 - **Face Recognition**: ArcFace 512-dimensional embeddings with cosine similarity matching
 - **Motion Detection**: Cross-frame centroid tracking with face re-identification
 - **Runtime**: ONNX Runtime with CUDA execution provider
+- **Storage**: PostgreSQL (TimescaleDB + pgvector) for face gallery; MinIO for guest images
+
+```mermaid
+flowchart LR
+    CC["Cognitive Companion<br/>(BFF)"] -->|"POST /identify-batch"| PersonID["Person ID Service<br/>(FastAPI :8200)"]
+    PersonID --> GPU["GPU<br/>InsightFace SCRFD + ArcFace"]
+    PersonID --> DB["PostgreSQL<br/>TimescaleDB + pgvector"]
+    PersonID --> MinIO["MinIO<br/>guest images"]
+```
+
+---
 
 ## Requirements
 
-- NVIDIA GPU with 10 GB+ VRAM (RTX 3060 or better)
-- CUDA 12.x drivers installed
-- Docker with NVIDIA Container Toolkit (for containerized deployment)
+| Component | Purpose |
+| --- | --- |
+| NVIDIA GPU (10 GB+ VRAM) | Face detection and recognition inference |
+| CUDA 12.x or later | GPU driver and libraries |
+| Python 3.12 | Runtime |
+| PostgreSQL (TimescaleDB + pgvector) | Face gallery, embeddings, centroids |
+| MinIO (S3-compatible) | Guest image object storage |
+| Docker + NVIDIA Container Toolkit | Containerized deployment |
+
+---
 
 ## Quick Start
 
@@ -23,8 +45,15 @@ GPU-accelerated face recognition and motion direction detection service for the 
 # Build
 docker build -t person-id-service .
 
-# Run with GPU access and persistent data volume
-docker run --gpus all -p 8200:8200 -v $(pwd)/data:/app/data person-id-service
+# Run with GPU access and model data volume
+docker run --gpus all -p 8200:8200 \
+  -e DATABASE_URL=postgresql://user:pass@host:5432/db \
+  -e MINIO_ENDPOINT=host:9000 \
+  -e MINIO_ACCESS_KEY=minioadmin \
+  -e MINIO_SECRET_KEY=minioadmin \
+  -e MINIO_BUCKET=cognitive-companion \
+  -v $(pwd)/data:/app/data \
+  person-id-service
 
 # Verify
 curl http://localhost:8200/health
@@ -33,168 +62,92 @@ curl http://localhost:8200/health
 ### Docker Compose
 
 ```bash
+cp .env.example .env   # set DATABASE_URL and MinIO credentials
 docker compose up -d
 ```
-
-Configuration is driven by `config/settings.yaml`. Override individual values via environment variables  -  see the commented `environment:` block in `docker-compose.yml` for the full list.
 
 ### Local Development
 
 ```bash
-# Install uv (https://docs.astral.sh/uv/)
+# Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Create virtual environment and install dependencies
-uv sync
-
-# GPU build (default)
+# GPU build
 uv sync
 
 # CPU-only (development/testing without a GPU)
 uv sync --extra cpu
 
+# Set required environment variables
+export DATABASE_URL=postgresql://user:pass@localhost:5432/cognitive_companion
+export MINIO_ENDPOINT=localhost:9000
+export MINIO_ACCESS_KEY=minioadmin
+export MINIO_SECRET_KEY=minioadmin
+
 # Run
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 ```
 
+---
+
 ## Configuration
 
-All settings live in `config/settings.yaml`. Values marked with `${VAR:default}` can be overridden at runtime by setting the named environment variable  -  no file edits required.
+All settings in `config/settings.yaml` with `${ENV_VAR:default}` interpolation. Override at runtime via environment variables.
 
-| Env var | settings.yaml key | Default | Description |
+| Setting | Env var | Default | Description |
 | --- | --- | --- | --- |
-| `PERSON_ID_MODEL` | `face_engine.model_name` | `buffalo_l` | InsightFace model pack (`buffalo_s` for faster inference) |
-| `CUDA_DEVICE_ID` | `face_engine.ctx_id` | `0` | GPU device index (`-1` for CPU fallback) |
-| `DETECTION_THRESHOLD` | `face_engine.det_threshold` | `0.5` | Minimum face detection confidence |
-| `RECOGNITION_THRESHOLD` | `recognition.threshold` | `0.4` | Cosine similarity threshold for positive ID |
-| `LOG_LEVEL` | `logging.level` | `INFO` | Log verbosity (`DEBUG`, `INFO`, `WARNING`) |
+| `face_engine.model_name` | `PERSON_ID_MODEL` | `buffalo_l` | InsightFace model pack |
+| `face_engine.ctx_id` | `CUDA_DEVICE_ID` | `0` | GPU device index (`-1` for CPU) |
+| `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
+| `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
+| `recognition.unknown_threshold` | -- | `0.25` | Below this = definitely unknown |
+| `database.dsn` | `DATABASE_URL` | -- | PostgreSQL connection string (required) |
+| `minio.endpoint` | `MINIO_ENDPOINT` | `localhost:9000` | MinIO/S3 endpoint |
+| `minio.access_key` | `MINIO_ACCESS_KEY` | `minioadmin` | MinIO access key |
+| `minio.secret_key` | `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
+| `minio.bucket` | `MINIO_BUCKET` | `cognitive-companion` | S3 bucket name |
+| `logging.level` | `LOG_LEVEL` | `INFO` | Log verbosity |
 
-Additional tunable settings (edit `config/settings.yaml` directly):
+Additional tuning options (edit `config/settings.yaml` directly):
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `face_engine.det_size` | `[640, 640]` | Detection input resolution |
-| `recognition.unknown_threshold` | `0.25` | Below this = definitely unknown |
-| `motion.min_displacement_fraction` | `0.05` | Min displacement (% of frame) to count as movement |
-| `annotation.box_color_known` | `[0, 200, 0]` | BGR color for known person bounding boxes |
-| `annotation.box_color_unknown` | `[0, 165, 255]` | BGR color for unknown person bounding boxes |
-| `annotation.text_scale` | `0.7` | Font scale for name labels |
-| `annotation.box_thickness` | `2` | Bounding box line thickness |
+| `motion.min_displacement_fraction` | `0.05` | Min displacement (% of frame) for movement |
+| `motion.cross_frame_similarity` | `0.5` | Unknown-face cross-frame similarity threshold |
+| `annotation.box_color_known` | `[0, 200, 0]` | BGR color for known person boxes |
+| `annotation.box_color_unknown` | `[0, 165, 255]` | BGR color for unknown person boxes |
 
-## Code Quality
+---
 
-```bash
-# Lint
-uv run ruff check .
+## API Endpoints
 
-# Format
-uv run ruff format .
+All under `/api/v1`:
 
-# Type check
-uv run mypy app/
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Health check (GPU status, enrolled count) |
+| `POST` | `/enroll` | Enroll member with base64 images |
+| `POST` | `/enroll/upload/{person_id}` | Enroll via multipart file upload |
+| `GET` | `/members` | List all enrolled members |
+| `GET` | `/members/{person_id}` | Get member details |
+| `DELETE` | `/members/{person_id}` | Remove member |
+| `POST` | `/identify` | Identify faces in a single image |
+| `POST` | `/identify-batch` | Batch identify + motion detection |
+| `POST` | `/detect-motion` | Standalone motion direction detection |
 
-# Run all checks (lint + format + type check)
-uv run ruff check . && uv run ruff format --check . && uv run mypy app/
+Full reference: [silvermind-project.github.io/api/reference](https://silvermind-project.github.io/api/reference).
 
-# Tests
-uv run pytest
-```
-
-## Member Management API
-
-Full CRUD operations for managing enrolled household members. No model fine-tuning is needed; the pretrained ArcFace model generalizes to new faces. "Enrollment" simply means registering reference photos for each person.
-
-### Best Practices for Enrollment Photos
-
-1. **Capture 5-10 images per person** for robust recognition
-2. **Vary lighting**: daylight, evening lamp, nightlight
-3. **Vary angle**: front face, slight left/right turns, looking down
-4. **Include accessories**: with/without glasses, different hairstyles
-5. **Use actual cameras**: photos from the deployment cameras match the inference domain best
-6. **Avoid group photos**: each image should contain only the target person's face clearly visible
-
-### List All Members
-
-`GET /api/v1/members`
-
-Returns all enrolled household members with their metadata.
+### Enroll a Member
 
 ```bash
-curl http://localhost:8200/api/v1/members
-```
+IMG1=$(base64 -w0 photo1.jpg)
+IMG2=$(base64 -w0 photo2.jpg)
 
-Response:
-
-```json
-{
-  "members": [
-    {
-      "person_id": "grandma",
-      "name": "Grandma",
-      "embedding_count": 5,
-      "created_at": "2026-03-20T14:30:00+00:00"
-    },
-    {
-      "person_id": "grandpa",
-      "name": "Grandpa",
-      "embedding_count": 3,
-      "created_at": "2026-03-20T14:35:00+00:00"
-    }
-  ],
-  "total": 2
-}
-```
-
-### Get a Single Member
-
-`GET /api/v1/members/{person_id}`
-
-Returns details for a specific enrolled member. Returns 404 if the member does not exist.
-
-```bash
-curl http://localhost:8200/api/v1/members/grandma
-```
-
-Response:
-
-```json
-{
-  "person_id": "grandma",
-  "name": "Grandma",
-  "embedding_count": 5,
-  "created_at": "2026-03-20T14:30:00+00:00"
-}
-```
-
-### Enroll a New Member (base64 JSON)
-
-`POST /api/v1/enroll`
-
-Enroll a new household member by providing base64-encoded face images in a JSON payload. If the `person_id` already exists, the new images are added and the centroid embedding is recomputed (see "Add More Images" below).
-
-```bash
-# Encode images to base64
-IMG1=$(base64 -w0 grandma_photo1.jpg)
-IMG2=$(base64 -w0 grandma_photo2.jpg)
-IMG3=$(base64 -w0 grandma_photo3.jpg)
-
-# Enroll
 curl -X POST http://localhost:8200/api/v1/enroll \
   -H "Content-Type: application/json" \
-  -d "{
-    \"person_id\": \"grandma\",
-    \"name\": \"Grandma\",
-    \"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"]
-  }"
+  -d "{\"person_id\": \"grandma\", \"name\": \"Grandma\", \"images\": [\"$IMG1\", \"$IMG2\"]}"
 ```
-
-Request body fields:
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `person_id` | string | Yes | Unique identifier (1-64 characters) |
-| `name` | string | Yes | Display name (1-128 characters) |
-| `images` | list[string] | Yes | Base64-encoded face images (JPEG/PNG), minimum 1 |
 
 Response:
 
@@ -202,76 +155,15 @@ Response:
 {
   "person_id": "grandma",
   "name": "Grandma",
-  "embedding_count": 3,
+  "embedding_count": 2,
   "status": "enrolled",
   "failed_images": []
 }
 ```
 
-The `status` field will be `"enrolled"` for new members or `"updated"` when adding images to an existing member. The `failed_images` list contains the indices of any images where no face could be detected. If no faces are detected in any image, the endpoint returns HTTP 422.
+For file upload: `POST /api/v1/enroll/upload/{person_id}` with multipart `name` and `files` fields.
 
-### Enroll a New Member (file upload)
-
-`POST /api/v1/enroll/upload/{person_id}`
-
-A convenience endpoint for enrolling via multipart file upload, useful with curl or admin tools. Behaves identically to the base64 endpoint in terms of enrollment logic.
-
-```bash
-curl -X POST http://localhost:8200/api/v1/enroll/upload/grandma \
-  -F "name=Grandma" \
-  -F "files=@grandma_photo1.jpg" \
-  -F "files=@grandma_photo2.jpg" \
-  -F "files=@grandma_photo3.jpg"
-```
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `person_id` | path param | Yes | Unique identifier for the person |
-| `name` | form field | Yes | Display name |
-| `files` | file(s) | Yes | One or more image files (JPEG/PNG) |
-
-Returns the same `EnrollResult` response as the base64 endpoint.
-
-### Add More Images to an Existing Member
-
-To improve recognition accuracy, call either enroll endpoint again with the same `person_id`. New embeddings are appended to the existing set and the centroid is recomputed. The response `status` will be `"updated"` instead of `"enrolled"`.
-
-```bash
-# Add two more photos using the base64 endpoint
-IMG4=$(base64 -w0 grandma_photo4.jpg)
-IMG5=$(base64 -w0 grandma_photo5.jpg)
-
-curl -X POST http://localhost:8200/api/v1/enroll \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"person_id\": \"grandma\",
-    \"name\": \"Grandma\",
-    \"images\": [\"$IMG4\", \"$IMG5\"]
-  }"
-```
-
-### Delete a Member
-
-`DELETE /api/v1/members/{person_id}`
-
-Permanently removes an enrolled member and all their stored embeddings (individual embeddings and centroid). Returns 404 if the member does not exist.
-
-```bash
-curl -X DELETE http://localhost:8200/api/v1/members/grandma
-```
-
-Response:
-
-```json
-{
-  "deleted": true,
-  "person_id": "grandma"
-}
-```
-
-## Inference (Identification)
-
-### Single Image
+### Identify Faces in an Image
 
 ```bash
 IMG=$(base64 -w0 camera_snapshot.jpg)
@@ -286,184 +178,63 @@ Response:
 ```json
 {
   "faces": [
-    {
-      "person_id": "grandma",
-      "name": "Grandma",
-      "confidence": 0.87,
-      "bbox": [120.5, 80.2, 250.3, 310.7]
-    }
+    {"person_id": "grandma", "name": "Grandma", "confidence": 0.87, "bbox": [120, 80, 250, 310]}
   ],
   "annotated_image": null
 }
 ```
 
-### Annotated Image Output
+### Batch Identification with Motion
 
-Set `include_annotated_image: true` to receive the image back with bounding boxes and name labels drawn on it. Known persons are drawn in green, unknown in orange.
-
-```bash
-curl -X POST http://localhost:8200/api/v1/identify \
-  -H "Content-Type: application/json" \
-  -d "{\"image\": \"$IMG\", \"include_annotated_image\": true}"
-```
-
-The response `annotated_image` field contains a base64-encoded JPEG with bounding boxes and `"Name 85%"` labels drawn over each detected face. This is used by the Cognitive Companion pipeline's `person_identification` step when `include_annotated_image` is enabled in the step config, providing downstream VLM steps with labeled frames for better contextual analysis.
-
-### Batch Identification with Motion Detection
-
-This is the primary endpoint used by the Cognitive Companion backend. Send a sequence of frames (typically 5 from the event aggregator) to identify faces and detect motion direction.
+This is the primary endpoint used by the Cognitive Companion backend:
 
 ```bash
-IMG1=$(base64 -w0 frame_001.jpg)
-IMG2=$(base64 -w0 frame_002.jpg)
-IMG3=$(base64 -w0 frame_003.jpg)
-
 curl -X POST http://localhost:8200/api/v1/identify-batch \
   -H "Content-Type: application/json" \
-  -d "{
-    \"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"],
-    \"include_motion\": true,
-    \"include_annotated_image\": false
-  }"
+  -d "{\"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"], \"include_motion\": true}"
 ```
 
-Response:
+Response includes per-frame detections, motion direction per person, and optional annotated images.
 
-```json
-{
-  "frames": [
-    {"frame_index": 0, "faces": [{"person_id": "grandma", "name": "Grandma", "confidence": 0.85, "bbox": [100, 50, 200, 250]}]},
-    {"frame_index": 1, "faces": [{"person_id": "grandma", "name": "Grandma", "confidence": 0.87, "bbox": [150, 55, 260, 260]}]},
-    {"frame_index": 2, "faces": [{"person_id": "grandma", "name": "Grandma", "confidence": 0.86, "bbox": [210, 60, 320, 270]}]}
-  ],
-  "motion": [
-    {"person_id": "grandma", "name": "Grandma", "direction": "left-to-right", "confidence": 0.92}
-  ],
-  "annotated_images": null
-}
-```
+### Motion Direction Detection
 
-### Motion Direction Only
-
-```bash
-curl -X POST http://localhost:8200/api/v1/detect-motion \
-  -H "Content-Type: application/json" \
-  -d "{\"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"]}"
-```
-
-## Motion Direction Detection
-
-The service detects four directions of movement:
-
-| Direction | Meaning | Detection Method |
+| Direction | Meaning | Detection |
 | --- | --- | --- |
-| `left-to-right` | Person moving rightward in frame | Horizontal centroid displacement |
-| `right-to-left` | Person moving leftward in frame | Horizontal centroid displacement |
-| `towards-camera` | Person approaching the camera | Face bounding box area increasing |
-| `away-from-camera` | Person moving away from camera | Face bounding box area decreasing |
-| `stationary` | No significant movement | Below displacement threshold |
+| `left-to-right` | Moving rightward | Horizontal centroid displacement |
+| `right-to-left` | Moving leftward | Horizontal centroid displacement |
+| `towards-camera` | Approaching camera | Face area increasing |
+| `away-from-camera` | Moving away | Face area decreasing |
+| `stationary` | No movement | Below displacement threshold |
 
-### Doorway Configuration
-
-For cameras at doorways, configure the camera sensor's `config_json` in the Cognitive Companion backend with a `door_direction` field to map left/right motion to entering/leaving semantics:
-
-```json
-{
-  "door_direction": "left_is_inside"
-}
-```
-
-## Guest/Unknown Handling
-
-- Faces not matching any enrolled member are classified as `"unknown"` with `name: "Guest"`
-- The `confidence` field shows how close the best match was
-- Between `unknown_threshold` (0.25) and `threshold` (0.4): uncertain match
-- Below `unknown_threshold`: definitely unknown
-
-### Saving Guest Images
-
-Both `/identify` and `/identify-batch` endpoints accept a `save_guest_images` flag (default: `false`). When enabled, the **full frame image** is saved to disk whenever unidentified guests are detected. This is useful for reviewing visitors, building enrollment datasets, or auditing false negatives.
-
-```bash
-# Single image - save if guests detected
-curl -X POST http://localhost:8200/api/v1/identify \
-  -H "Content-Type: application/json" \
-  -d "{\"image\": \"$IMG\", \"save_guest_images\": true}"
-
-# Batch - save frames containing guests
-curl -X POST http://localhost:8200/api/v1/identify-batch \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"images\": [\"$IMG1\", \"$IMG2\", \"$IMG3\"],
-    \"include_motion\": true,
-    \"save_guest_images\": true
-  }"
-```
-
-Images are saved to `data/guests/` organized by date:
-
-```text
-data/guests/
-├── 2026-03-23/
-│   ├── 143022-123456_f0_2guests.jpg
-│   ├── 143022-234567_f1_1guests.jpg
-│   └── ...
-└── 2026-03-24/
-    └── ...
-```
-
-The filename encodes: `{UTC time}_{frame index}_{guest count}.jpg`
-
-Configure the storage directory in `config/settings.yaml`:
-
-```yaml
-storage:
-  guest_images_dir: "data/guests"   # default
-```
+---
 
 ## Data Storage
 
 ```text
 data/
-├── face_db.sqlite              # Enrollment metadata (person_id, name, counts)
-├── embeddings/
-│   ├── grandma/
-│   │   ├── centroid.npy         # Mean embedding (used for fast identification)
-│   │   ├── embedding_0.npy     # Individual face embeddings
-│   │   ├── embedding_1.npy
-│   │   └── ...
-│   └── grandpa/
-│       ├── centroid.npy
-│       └── ...
-└── guests/                      # Saved guest images (when save_guest_images=true)
-    ├── 2026-03-23/
-    │   └── *.jpg
-    └── ...
+  models/buffalo_l/
+    det_10g.onnx            # SCRFD face detection (16.9 MB)
+    w600k_r50.onnx          # ArcFace recognition 512-dim (174.4 MB)
+    2d106det.onnx           # 2D landmark detection (5.0 MB)
+    1k3d68.onnx             # 3D landmark estimation (143.6 MB)
+    genderage.onnx          # Gender/age estimation (1.3 MB)
 ```
 
-Mount the `data/` directory as a persistent volume to retain enrollment and guest images across container restarts.
+Face embeddings and centroids are stored in PostgreSQL (pgvector). Guest images are uploaded to MinIO. The `data/` directory contains only ONNX model files.
 
-## Improving Accuracy
+---
 
-If recognition accuracy is low for a specific person:
+## Code Quality
 
-1. **Add more reference photos** via the enrollment endpoint (different angles, lighting)
-2. **Lower the recognition threshold** via `RECOGNITION_THRESHOLD` env var or `recognition.threshold` in `config/settings.yaml` (e.g., `0.35`)  -  increases true positives but may increase false positives
-3. **Use photos from the actual cameras**  -  domain-matched images work best
-4. **Check face visibility**  -  ensure cameras capture faces clearly (adequate lighting, appropriate angle)
-
-## Kubernetes Deployment
-
-Kubernetes manifests are in `kubernetes/`:
-
-```text
-kubernetes/
-├── base/                  # Environment-agnostic manifests
-│   ├── deployment.yaml    # GPU deployment (nvidia.com/gpu: 1)
-│   ├── service.yaml       # ClusterIP on port 8200
-│   └── pvc.yaml           # 5 Gi persistent volume for data/
-└── local/                 # Local cluster overlay
-    └── deployment.yaml    # localhost:32000 registry image
+```bash
+uv run ruff check .               # Lint
+uv run ruff format --check .      # Format check
+uv run mypy app/                  # Type check
+uv run pytest                     # Tests
 ```
 
-The service is deployed as `person-id-svc` on port 8200 and is accessed by the Cognitive Companion backend via `PERSON_ID_SERVICE_URL`.
+---
+
+## License
+
+AGPL-3.0-or-later
