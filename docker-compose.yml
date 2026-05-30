@@ -10,10 +10,8 @@
 #   - MinIO object storage (external, reachable at MINIO_ENDPOINT)
 #   - NVIDIA Container Toolkit (nvidia-ctk)
 #
-# Configuration is driven entirely by config/settings.yaml.
-# Override individual settings at runtime via environment variables —
-# each setting that supports override is documented with its env var name
-# in config/settings.yaml.
+# Configuration is driven by config/settings.yaml and the required secrets
+# provided to Docker Compose.
 
 services:
   person-id:
@@ -27,12 +25,12 @@ services:
     ports:
       - "8200:8200"
     environment:
-      DATABASE_URL: "postgresql://${PID_DB_USER:-pid_user}:${PID_DB_PASSWORD:?err}@postgres:5432/person_identification"
-      MINIO_ENDPOINT: "${MINIO_ENDPOINT}"
-      MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY}"
-      MINIO_SECRET_KEY: "${MINIO_SECRET_KEY}"
-      MINIO_BUCKET: "${MINIO_BUCKET}"
-      CUDA_DEVICE_ID: "${CUDA_DEVICE_ID:-0}"
+      DATABASE_URL: "postgresql://${PID_DB_USER:?err}:${PID_DB_PASSWORD:?err}@postgres:5432/person_identification"
+      MINIO_ENDPOINT: "${MINIO_ENDPOINT:?err}"
+      MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY:?err}"
+      MINIO_SECRET_KEY: "${MINIO_SECRET_KEY:?err}"
+      MINIO_BUCKET: "${MINIO_BUCKET:?err}"
+      CUDA_DEVICE_ID: "0"
     deploy:
       resources:
         reservations:
