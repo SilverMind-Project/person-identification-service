@@ -21,6 +21,8 @@ router = APIRouter(prefix="/api/v1", tags=["motion"])
 @router.post("/detect-motion", response_model=MotionDetectionResponse)
 async def detect_motion(request: Request, body: MotionDetectionRequest):
     """Detect direction of motion for persons across a frame sequence."""
+    logger.info("POST /detect-motion images=%d", len(body.images))
+
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
     motion_detector = request.app.state.motion_detector
@@ -51,7 +53,7 @@ async def detect_motion(request: Request, body: MotionDetectionRequest):
         frame_identities=all_identities,
     )
 
-    return MotionDetectionResponse(
+    response = MotionDetectionResponse(
         persons=[
             PersonTrack(
                 track_id=t.track_id,
@@ -67,3 +69,11 @@ async def detect_motion(request: Request, body: MotionDetectionRequest):
             for t in tracks
         ]
     )
+    logger.info(
+        "POST /detect-motion -> tracks=%d persons=[%s]",
+        len(response.persons),
+        ", ".join(f"{p.person_id}:{p.direction}" for p in response.persons)
+        if response.persons
+        else "(none)",
+    )
+    return response

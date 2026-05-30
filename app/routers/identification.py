@@ -34,6 +34,13 @@ def _encode_image_to_base64(image) -> str:
 @router.post("/identify", response_model=IdentifyResponse)
 async def identify(request: Request, body: IdentifyRequest):
     """Identify faces in a single image."""
+    logger.info(
+        "POST /identify image_size=%d include_annotated=%s save_guests=%s",
+        len(body.image),
+        body.include_annotated_image,
+        body.save_guest_images,
+    )
+
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
 
@@ -53,7 +60,7 @@ async def identify(request: Request, body: IdentifyRequest):
         annotated = annotate_image(image, identities)
         annotated_b64 = _encode_image_to_base64(annotated)
 
-    return IdentifyResponse(
+    response = IdentifyResponse(
         faces=[
             FaceDetection(
                 person_id=r.person_id,
@@ -65,6 +72,13 @@ async def identify(request: Request, body: IdentifyRequest):
         ],
         annotated_image=annotated_b64,
     )
+    logger.info(
+        "POST /identify -> faces=%d persons=[%s] annotated_size=%s",
+        len(response.faces),
+        ", ".join(f.person_id for f in response.faces) if response.faces else "(none)",
+        len(annotated_b64) if annotated_b64 else "none",
+    )
+    return response
 
 
 @router.post("/identify-batch", response_model=BatchIdentifyResponse)
@@ -74,6 +88,14 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
     This is the primary endpoint consumed by the Cognitive Companion v2 backend.
     It accepts the full batch from the event aggregator (typically 5 frames).
     """
+    logger.info(
+        "POST /identify-batch images=%d include_motion=%s include_annotated=%s save_guests=%s",
+        len(body.images),
+        body.include_motion,
+        body.include_annotated_image,
+        body.save_guest_images,
+    )
+
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
     motion_detector = request.app.state.motion_detector
@@ -158,8 +180,17 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
             else:
                 annotated_images.append(_encode_image_to_base64(decoded))
 
-    return BatchIdentifyResponse(
+    response = BatchIdentifyResponse(
         frames=frames,
         motion=motion,
         annotated_images=annotated_images,
     )
+    face_counts = [len(f.faces) for f in response.frames]
+    logger.info(
+        "POST /identify-batch -> frames=%d faces_per_frame=%s motion_tracks=%d annotated=%d",
+        len(response.frames),
+        face_counts,
+        len(response.motion),
+        len(annotated_images) if annotated_images else 0,
+    )
+    return response

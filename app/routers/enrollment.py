@@ -17,6 +17,13 @@ router = APIRouter(prefix="/api/v1", tags=["enrollment"])
 @router.post("/enroll", response_model=EnrollResult)
 async def enroll(request: Request, body: EnrollRequest):
     """Enroll a new household member with face images."""
+    logger.info(
+        "POST /enroll person_id=%s name=%s images=%d",
+        body.person_id,
+        body.name,
+        len(body.images),
+    )
+
     store = request.app.state.enrollment_store
 
     images: list[np.ndarray] = []
@@ -31,10 +38,21 @@ async def enroll(request: Request, body: EnrollRequest):
 
     result = await store.enroll(body.person_id, body.name, images)
     if result.status == "failed":
+        logger.warning(
+            "POST /enroll -> failed person_id=%s reason=no_faces_detected",
+            body.person_id,
+        )
         raise HTTPException(
             status_code=422,
             detail=f"No faces detected in any of the {len(body.images)} images",
         )
+    logger.info(
+        "POST /enroll -> person_id=%s status=%s embedding_count=%d failed_images=%s",
+        result.person_id,
+        result.status,
+        result.embedding_count,
+        result.failed_images,
+    )
     return result
 
 
@@ -46,6 +64,13 @@ async def enroll_upload(
     files: list[UploadFile] = File(...),
 ):
     """Enroll via multipart file upload (convenience for curl/admin tools)."""
+    logger.info(
+        "POST /enroll/upload person_id=%s name=%s files=%d",
+        person_id,
+        name,
+        len(files),
+    )
+
     store = request.app.state.enrollment_store
     import cv2
 
@@ -62,7 +87,18 @@ async def enroll_upload(
 
     result = await store.enroll(person_id, name, images)
     if result.status == "failed":
+        logger.warning(
+            "POST /enroll/upload -> failed person_id=%s reason=no_faces_detected",
+            person_id,
+        )
         raise HTTPException(status_code=422, detail="No faces detected in any uploaded images")
+    logger.info(
+        "POST /enroll/upload -> person_id=%s status=%s embedding_count=%d failed_images=%s",
+        result.person_id,
+        result.status,
+        result.embedding_count,
+        result.failed_images,
+    )
     return result
 
 
