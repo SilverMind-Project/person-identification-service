@@ -10,6 +10,18 @@ class FaceDetection(BaseModel):
     name: str
     confidence: float = Field(..., ge=0.0, le=1.0)
     bbox: list[float] = Field(..., description="[x1, y1, x2, y2] bounding box")
+    recognition_state: str = Field(
+        default="recognized",
+        description="One of: recognized, candidate, unrecognized",
+    )
+    best_candidate_id: str | None = Field(
+        default=None, description="Nearest centroid person_id, even when below threshold"
+    )
+    similarity: float = Field(default=0.0, description="Raw cosine similarity to best candidate")
+    yaw_deg: float = Field(default=0.0, description="Head pose yaw in degrees")
+    pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")
+    roll_deg: float = Field(default=0.0, description="Head pose roll in degrees")
+    det_score: float = Field(default=0.0, description="SCRFD detection confidence score")
 
 
 class IdentifyRequest(BaseModel):

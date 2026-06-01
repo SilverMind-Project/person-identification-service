@@ -67,6 +67,13 @@ async def identify(request: Request, body: IdentifyRequest):
                 name=r.name,
                 confidence=r.confidence,
                 bbox=r.bbox,
+                recognition_state=r.recognition_state,
+                best_candidate_id=r.best_candidate_id,
+                similarity=r.similarity,
+                yaw_deg=r.yaw_deg,
+                pitch_deg=r.pitch_deg,
+                roll_deg=r.roll_deg,
+                det_score=r.det_score,
             )
             for r in identities
         ],
@@ -141,6 +148,13 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
                         name=r.name,
                         confidence=r.confidence,
                         bbox=r.bbox,
+                        recognition_state=r.recognition_state,
+                        best_candidate_id=r.best_candidate_id,
+                        similarity=r.similarity,
+                        yaw_deg=r.yaw_deg,
+                        pitch_deg=r.pitch_deg,
+                        roll_deg=r.roll_deg,
+                        det_score=r.det_score,
                     )
                     for r in identities
                 ],

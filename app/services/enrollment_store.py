@@ -30,6 +30,7 @@ class EnrollmentStore:
         self._pool = pool
         self._engine = face_engine
         self._threshold = float(config.get("recognition.threshold", 0.4))
+        self._unknown_threshold = float(config.get("recognition.unknown_threshold", 0.25))
 
     async def enroll(self, person_id: str, name: str, images: list[np.ndarray]) -> EnrollResult:
         """Enroll a new person or add images to an existing member.
@@ -139,7 +140,15 @@ class EnrollmentStore:
     async def identify(self, embedding: np.ndarray) -> IdentifyResult:
         """Identify a detected face against the enrolled gallery using DiskANN index.
 
-        Returns the best match or "unknown" if below threshold.
+        Always returns the best candidate and recognition state, even when
+        similarity is below the recognition threshold.  The three states are:
+
+        - ``recognized``:  similarity >= threshold (strong positive).
+        - ``candidate``:   unknown_threshold <= similarity < threshold (grey zone).
+        - ``unrecognized``: similarity < unknown_threshold (definitely unknown).
+
+        For backward compatibility ``person_id`` stays ``"unknown"`` when below
+        ``threshold``, but ``best_candidate_id`` always carries the nearest centroid.
         """
         from app.services.face_models import IdentifyResult
 
@@ -155,22 +164,44 @@ class EnrollmentStore:
             )
 
             if row is None:
-                return IdentifyResult(person_id="unknown", name="Guest", confidence=0.0, bbox=[])
-
-            similarity = float(row["similarity"])
-            if similarity < self._threshold:
                 return IdentifyResult(
                     person_id="unknown",
                     name="Guest",
-                    confidence=max(0.0, similarity),
+                    confidence=0.0,
                     bbox=[],
+                    best_candidate_id=None,
+                    similarity=0.0,
+                    recognition_state="unrecognized",
                 )
 
+            similarity = float(row["similarity"])
+            best_id: str | None = row["person_id"]
+            best_name: str = row["name"]
+
+            if similarity >= self._threshold:
+                recognition_state = "recognized"
+                person_id = best_id
+                name = best_name
+                confidence = similarity
+            elif similarity >= self._unknown_threshold:
+                recognition_state = "candidate"
+                person_id = "unknown"
+                name = "Guest"
+                confidence = similarity
+            else:
+                recognition_state = "unrecognized"
+                person_id = "unknown"
+                name = "Guest"
+                confidence = max(0.0, similarity)
+
             return IdentifyResult(
-                person_id=row["person_id"],
-                name=row["name"],
-                confidence=similarity,
+                person_id=person_id,
+                name=name,
+                confidence=confidence,
                 bbox=[],
+                best_candidate_id=best_id,
+                similarity=similarity,
+                recognition_state=recognition_state,
             )
 
     async def identify_all(self, faces: list[DetectedFace]) -> list[IdentifyResult]:
@@ -183,8 +214,12 @@ class EnrollmentStore:
         results: list[IdentifyResult] = []
         for face in faces:
             result = await self.identify(face.embedding)
-            # Carry forward the bbox from the detected face
+            # Carry forward detection-level fields from the detected face.
             result.bbox = face.bbox
+            result.yaw_deg = face.yaw_deg
+            result.pitch_deg = face.pitch_deg
+            result.roll_deg = face.roll_deg
+            result.det_score = face.det_score
             results.append(result)
         return results
 
