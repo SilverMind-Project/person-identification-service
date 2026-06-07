@@ -1,5 +1,7 @@
 """Tests for GuestImageStore with MinIO + TimescaleDB."""
 
+from __future__ import annotations
+
 import os
 
 import asyncpg
@@ -8,7 +10,7 @@ import pytest
 import pytest_asyncio
 from pgvector.asyncpg import register_vector
 
-from app.services.enrollment_store import ensure_schema
+from app.db.migrate import run_migrations
 from app.services.guest_store import GuestImageStore
 
 TEST_DSN = os.getenv(
@@ -57,7 +59,7 @@ async def pool():
         await register_vector(conn)
 
     pool = await asyncpg.create_pool(TEST_DSN, init=_init, min_size=1, max_size=3)
-    await ensure_schema(pool)
+    await run_migrations(pool)
     yield pool
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM guest_visits")

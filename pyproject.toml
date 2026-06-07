@@ -8,9 +8,8 @@ license = "AGPL-3.0"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "insightface==0.7.3",
-    "scikit-image<0.26.0",
-    "onnxruntime-gpu @ https://github.com/ultralytics/assets/releases/download/v0.0.0/onnxruntime_gpu-1.24.0-cp312-cp312-linux_aarch64.whl",
+    "triton-shared",
+    "tritonclient[grpc]>=2.51.0",
     "opencv-python-headless>=4.9",
     "numpy>=1.26",
     "pyyaml>=6.0",
@@ -22,7 +21,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cpu = [
+model-tools = [
+    "insightface==0.7.3",
+    "scikit-image<0.26.0",
     "onnxruntime>=1.24",
 ]
 dev = [
@@ -91,13 +92,14 @@ exclude = ["tests/", "\\.venv/"]
 
 [[tool.mypy.overrides]]
 module = [
-    "insightface.*",
     "cv2.*",
     "numpy.*",
     "yaml.*",
-    "onnxruntime.*",
 ]
 ignore_missing_imports = true
+
+[tool.uv.sources]
+triton-shared = { git = "https://github.com/SilverMind-Project/triton-shared" }
 
 [[tool.mypy.overrides]]
 module = [

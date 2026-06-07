@@ -42,7 +42,7 @@ async def detect_motion(request: Request, body: MotionDetectionRequest):
             continue
 
         frame_shapes.append((image.shape[0], image.shape[1]))
-        faces = engine.detect_faces(image)
+        faces = await engine.detect_faces(image)
         identities = await store.identify_all(faces)
         all_faces.append(faces)
         all_identities.append(identities)

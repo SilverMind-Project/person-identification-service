@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+import cv2
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
@@ -72,8 +73,6 @@ async def enroll_upload(
     )
 
     store = request.app.state.enrollment_store
-    import cv2
-
     images: list[np.ndarray] = []
     for f in files:
         data = await f.read()

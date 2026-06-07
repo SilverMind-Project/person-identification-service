@@ -38,7 +38,7 @@ class _FakeFace:
         self._lm_3d = landmark_3d_68
 
     @property
-    def landmark_3d_68(self):
+    def landmark_3d_68(self) -> np.ndarray | None:
         return self._lm_3d
 
 
@@ -161,13 +161,11 @@ class TestHeadPoseEstimation:
         assert np.isfinite(pitch)
         assert np.isfinite(roll)
 
-    def test_missing_landmarks_returns_zero(self):
-        """When 3D landmarks are absent, pose returns (0, 0, 0)."""
+    def test_missing_landmarks_fails_explicitly(self):
+        """Missing 3D landmarks are an invalid inference result."""
         face = _FakeFace(landmark_3d_68=None)
-        yaw, pitch, roll = _estimate_head_pose(face)
-        assert yaw == 0.0
-        assert pitch == 0.0
-        assert roll == 0.0
+        with pytest.raises(ValueError, match="68 landmarks"):
+            _estimate_head_pose(face)
 
     def test_different_geometry_yields_different_pose(self):
         """Two distinct landmark configurations produce different pose angles."""
@@ -177,7 +175,9 @@ class TestHeadPoseEstimation:
         yb, pb, rb = _estimate_head_pose(_FakeFace(landmark_3d_68=lm_b))
         # At least one angle component should differ.
         different = (abs(ya - yb) > 0.5) or (abs(pa - pb) > 0.5) or (abs(ra - rb) > 0.5)
-        assert different, f"Expected different poses, got ({ya:.1f},{pa:.1f},{ra:.1f}) vs ({yb:.1f},{pb:.1f},{rb:.1f})"
+        assert different, (
+            f"Expected different poses, got ({ya:.1f},{pa:.1f},{ra:.1f}) vs ({yb:.1f},{pb:.1f},{rb:.1f})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -212,25 +212,29 @@ async def seeded_store(recognition_pool):
     async with recognition_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO members (person_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            "alice", "Alice",
+            "alice",
+            "Alice",
         )
         await conn.execute(
             "INSERT INTO centroids (person_id, centroid, updated_at) VALUES ($1, $2, now()) "
             "ON CONFLICT (person_id) DO UPDATE SET centroid = excluded.centroid",
-            "alice", _alice_embedding().tolist(),
+            "alice",
+            _alice_embedding().tolist(),
         )
         await conn.execute(
             "INSERT INTO members (person_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            "bob", "Bob",
+            "bob",
+            "Bob",
         )
         await conn.execute(
             "INSERT INTO centroids (person_id, centroid, updated_at) VALUES ($1, $2, now()) "
             "ON CONFLICT (person_id) DO UPDATE SET centroid = excluded.centroid",
-            "bob", _bob_embedding().tolist(),
+            "bob",
+            _bob_embedding().tolist(),
         )
 
     class _NoOpFaceEngine:
-        def detect_faces(self, image):
+        async def detect_faces(self, image):
             return []
 
     yield EnrollmentStore(recognition_pool, _NoOpFaceEngine())

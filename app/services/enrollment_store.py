@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 import asyncpg
 import numpy as np
 
 from app import config
 from app.models.enrollment import EnrollResult, MemberInfo
-
-if TYPE_CHECKING:
-    from app.services.face_engine import FaceEngine
-    from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.face_models import DetectedFace, IdentifyResult
 
 logger = logging.getLogger(__name__)
+
+
+class FaceEngineProtocol(Protocol):
+    async def detect_faces(self, image: np.ndarray) -> list[DetectedFace]: ...
 
 
 class EnrollmentStore:
@@ -26,7 +26,7 @@ class EnrollmentStore:
     pre-computed centroids indexed with StreamingDiskANN via pgvectorscale.
     """
 
-    def __init__(self, pool: asyncpg.Pool, face_engine: FaceEngine) -> None:
+    def __init__(self, pool: asyncpg.Pool, face_engine: FaceEngineProtocol) -> None:
         self._pool = pool
         self._engine = face_engine
         self._threshold = float(config.get("recognition.threshold", 0.4))
@@ -60,7 +60,7 @@ class EnrollmentStore:
             failed_indices: list[int] = []
 
             for idx, img in enumerate(images):
-                faces = await asyncio.to_thread(self._engine.detect_faces, img)
+                faces = await self._engine.detect_faces(img)
                 if not faces:
                     failed_indices.append(idx)
                     continue
@@ -150,8 +150,6 @@ class EnrollmentStore:
         For backward compatibility ``person_id`` stays ``"unknown"`` when below
         ``threshold``, but ``best_candidate_id`` always carries the nearest centroid.
         """
-        from app.services.face_models import IdentifyResult
-
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 """SELECT m.person_id, m.name,
@@ -175,8 +173,8 @@ class EnrollmentStore:
                 )
 
             similarity = float(row["similarity"])
-            best_id: str | None = row["person_id"]
-            best_name: str = row["name"]
+            best_id = str(row["person_id"])
+            best_name = str(row["name"])
 
             if similarity >= self._threshold:
                 recognition_state = "recognized"

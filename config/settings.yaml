@@ -4,7 +4,7 @@
 # variable. Pass them through docker-compose's `environment:` section or the
 # host environment. Example:
 #
-#   CUDA_DEVICE_ID=1 uvicorn app.main:app ...
+#   TRITON_GRPC_URL=jetson-host:8701 uvicorn app.main:app ...
 #
 # All other settings require editing this file or mounting a custom config/.
 
@@ -18,20 +18,22 @@ server:
 
 # Face detection & recognition
 face_engine:
-  # InsightFace model pack. buffalo_l = accurate, buffalo_s = faster.
-  # Override: PERSON_ID_MODEL=buffalo_s
+  # Buffalo_L is served by Triton. Point this at the CTS Triton service by
+  # default, or set TRITON_GRPC_URL to the Jetson endpoint.
   model_name: "buffalo_l"
-  # Directory for cached InsightFace model files.
-  # Lives under /app/data so it persists across container restarts.
-  model_root: "data/models"
-  # GPU device index. 0 = first GPU, -1 = CPU fallback.
-  # Override: CUDA_DEVICE_ID=-1
-  ctx_id: 0
-  # Detection input size [width, height]. Larger = more accurate but slower.
+  triton_url: "${TRITON_GRPC_URL:triton:8701}"
+  triton_timeout_ms: "${TRITON_TIMEOUT_MS:30000}"
+  # Informational label exposed by /health. Use "full" for the DGX repository
+  # and "int8" for triton-models-jetson.
+  model_profile: "${PERSON_ID_MODEL_PROFILE:full}"
   det_size: [640, 640]
-  # Minimum face detection confidence (0.0 - 1.0).
-  # Override: DETECTION_THRESHOLD=0.6
-  det_threshold: 0.6
+  det_threshold: "${DETECTION_THRESHOLD:0.6}"
+  models:
+    detector: "face-detector-scrfd"
+    recognition: "face-recognition-arcface"
+    landmark_2d: "face-landmark-2d106"
+    landmark_3d: "face-landmark-3d68"
+    genderage: "face-attribute-genderage"
 
 # Recognition / identification
 recognition:

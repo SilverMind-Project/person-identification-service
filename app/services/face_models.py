@@ -16,6 +16,8 @@ class DetectedFace:
     yaw_deg: float = 0.0  # head pose yaw (left-right), degrees
     pitch_deg: float = 0.0  # head pose pitch (up-down), degrees
     roll_deg: float = 0.0  # head pose roll (tilt), degrees
+    gender: int | None = None  # InsightFace convention: 0=female, 1=male
+    age: int | None = None
 
 
 @dataclass

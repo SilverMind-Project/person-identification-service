@@ -1,29 +1,28 @@
-"""Dependency tests enforcing system stability and API compatibility."""
+"""Dependency tests for the production Triton inference path."""
+
+from __future__ import annotations
 
 import importlib.metadata
 
-import pytest
+from triton_shared.client import TritonGrpcClient
 
 
-def test_insightface_compatibility():
-    """Ensure our environment maintains a version of scikit-image compatible with InsightFace's APIs.
+def _major_minor(distribution: str) -> tuple[int, int]:
+    version = importlib.metadata.version(distribution)
+    major, minor, *_ = version.split(".")
+    return int(major), int(minor)
 
-    InsightFace 0.7.3 relies on skimage's `estimate()` method (deprecated in >= 0.26).
-    This test verifies that we are locked to a version strictly less than 0.26
-    to prevent FutureWarnings and future removal breakages.
-    """
-    try:
-        skimage_version = importlib.metadata.version("scikit-image")
-    except importlib.metadata.PackageNotFoundError:
-        pytest.skip("scikit-image not found in current non-Docker testing environment.")
-        return
 
-    # Split version string, e.g. "0.25.0" -> ["0", "25", "0"]
-    major, minor, *_rest = skimage_version.split(".")
+def test_tritonclient_version_supports_async_grpc() -> None:
+    """The shared client requires Triton's maintained asyncio gRPC API."""
+    assert _major_minor("tritonclient") >= (2, 51)
 
-    assert int(major) == 0, (
-        f"scikit-image major version {major} is not compatible with InsightFace 0.7.3"
-    )
-    assert int(minor) < 26, (
-        f"scikit-image version {skimage_version} yields FutureWarnings in InsightFace 0.7.3. Must be < 0.26"
-    )
+
+def test_triton_shared_is_installed() -> None:
+    """Production must use the shared Triton client contract."""
+    assert importlib.metadata.version("triton-shared")
+
+
+def test_triton_shared_exports_grpc_client() -> None:
+    """The installed Git revision must expose the client used at startup."""
+    assert TritonGrpcClient.__module__ == "triton_shared.client.grpc"

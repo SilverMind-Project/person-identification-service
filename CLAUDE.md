@@ -1,6 +1,6 @@
 # Person Identification Service -- Claude guidance
 
-GPU-accelerated face recognition and motion direction detection microservice for the Cognitive Companion system. Python 3.12 FastAPI, InsightFace (SCRFD + ArcFace), ONNX Runtime with CUDA, PostgreSQL (TimescaleDB + pgvector), MinIO.
+Triton-backed face recognition and motion direction detection microservice for the Cognitive Companion system. Python 3.12 FastAPI, Buffalo_L over Triton gRPC, PostgreSQL (TimescaleDB + pgvector), MinIO.
 
 ---
 
@@ -19,11 +19,10 @@ GPU-accelerated face recognition and motion direction detection microservice for
 # Run (development)
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 
-# GPU build (default)
 uv sync
 
-# CPU-only (development/testing without GPU)
-uv sync --extra cpu
+# Offline model conversion tools
+uv sync --extra model-tools
 
 # Lint
 uv run ruff check .
@@ -43,7 +42,7 @@ uv run pytest tests/test_guest_store.py -v
 
 # Docker
 docker build -t person-id-service .
-docker run --gpus all -p 8200:8200 -v $(pwd)/data:/app/data person-id-service
+docker run -p 8200:8200 -e TRITON_GRPC_URL=triton:8701 person-id-service
 
 # Docker Compose
 docker compose up -d
@@ -64,13 +63,13 @@ app/
     identification.py  # FaceDetection, IdentifyRequest/Response, BatchIdentifyRequest/Response, PersonMotion, FrameResult
     motion.py          # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
   routers/
-    health.py          # GET /health (GPU status, enrolled count, model name)
+    health.py          # GET /health (Triton endpoint/profile, model readiness metadata)
     enrollment.py      # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
     identification.py  # POST /identify, POST /identify-batch
     motion.py          # POST /detect-motion
   services/
-    face_engine.py     # InsightFace FaceAnalysis wrapper: detect_faces(), compute_similarity()
-    face_models.py     # DetectedFace, IdentifyResult dataclasses (no InsightFace dependency)
+    face_engine.py     # Triton Buffalo_L preprocessing, inference, and postprocessing
+    face_models.py     # DetectedFace and IdentifyResult dataclasses
     enrollment_store.py # pgvector gallery: enroll(), identify(), identify_all(), list_members(), remove_member()
     minio_client.py    # boto3 S3 wrapper: upload_bytes(), generate_presigned_url(), delete_object()
     motion_detector.py # Cross-frame centroid tracking + direction classification
@@ -88,10 +87,10 @@ migrations/
 2. Create asyncpg pool from `config.get("database.dsn")` with pgvector codec registered
 3. Run pending migrations via `app.db.migrate.run_migrations(pool)`
 4. Create MinIO client, ensure bucket exists
-5. Initialize `FaceEngine` in a threadpool (InsightFace `buffalo_l` model loaded to GPU)
+5. Open the Triton gRPC client and require all five Buffalo_L models to be ready
 6. Initialize `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
 7. Store all services on `app.state` (face_engine, enrollment_store, motion_detector, guest_store)
-8. On shutdown, close the asyncpg pool
+8. On shutdown, close Triton and the asyncpg pool
 
 **Service injection**: Services are attached to `app.state` in the lifespan. Routers access them via `request.app.state.<service>`.
 
@@ -101,17 +100,17 @@ migrations/
 
 ### FaceEngine
 
-Wraps InsightFace `FaceAnalysis` with `CUDAExecutionProvider` only.
+Runs SCRFD, ArcFace, 2D landmarks, 3D landmarks, and gender/age through Triton.
 
-- `detect_faces(image) -> list[DetectedFace]`: SCRFD detection + ArcFace 512-dim embedding extraction. Filters by `face_engine.det_threshold` (default 0.6).
+- `await detect_faces(image) -> list[DetectedFace]`: complete Buffalo_L inference.
 - `compute_similarity(emb1, emb2) -> float`: static method, cosine similarity via `np.dot`.
-- GPU availability detected via `onnxruntime.get_available_providers()`.
+- Startup fails if any configured model is unavailable. No local fallback exists.
 
 ### EnrollmentStore
 
 Manages face gallery in PostgreSQL with pgvector.
 
-- `enroll(person_id, name, images) -> EnrollResult`: Detects largest face per image via threadpool, INSERTs member + embeddings, recomputes normalized centroid (mean of all embeddings), UPSERTs into `centroids` table.
+- `enroll(person_id, name, images) -> EnrollResult`: Awaits face inference, selects the largest face per image, inserts embeddings, and recomputes the normalized centroid.
 - `identify(embedding) -> IdentifyResult`: Nearest-centroid query via pgvector `<=>` (cosine distance), `LIMIT 1`. Returns "unknown"/"Guest" if below `recognition.threshold` (default 0.4).
 - `identify_all(faces) -> list[IdentifyResult]`: Batch identify, carries forward bbox.
 - `list_members() -> list[MemberInfo]`: LEFT JOIN with embedding count.
@@ -176,8 +175,9 @@ Key settings:
 
 | Setting | Env var | Default | Description |
 | --- | --- | --- | --- |
-| `face_engine.model_name` | `PERSON_ID_MODEL` | `buffalo_l` | InsightFace model pack |
-| `face_engine.ctx_id` | `CUDA_DEVICE_ID` | `0` | GPU device index (-1 = CPU) |
+| `face_engine.triton_url` | `TRITON_GRPC_URL` | `triton:8701` | Triton gRPC endpoint |
+| `face_engine.model_profile` | `PERSON_ID_MODEL_PROFILE` | `full` | Health metadata |
+| `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Request timeout |
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
 | `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
 | `recognition.unknown_threshold` | -- | `0.25` | Below this = definitely unknown |
@@ -198,7 +198,7 @@ All under `/api/v1` prefix:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Health check (GPU status, enrolled count, model) |
+| `GET` | `/health` | Triton endpoint/profile and enrolled member count |
 | `POST` | `/enroll` | Enroll member with base64 images |
 | `POST` | `/enroll/upload/{person_id}` | Enroll via multipart file upload |
 | `GET` | `/members` | List all enrolled members |
@@ -210,20 +210,11 @@ All under `/api/v1` prefix:
 
 ---
 
-## Data Storage
+## Model Storage
 
-```text
-data/
-  models/
-    buffalo_l/            # ONNX model files (341 MB total)
-      det_10g.onnx        # SCRFD face detection
-      w600k_r50.onnx      # ArcFace recognition (512-dim)
-      2d106det.onnx       # 2D landmark detection
-      1k3d68.onnx         # 3D landmark estimation
-      genderage.onnx      # Gender/age estimation
-```
-
-Face embeddings and centroids are stored in PostgreSQL (pgvector), not on disk. Guest images are uploaded to MinIO, not the local filesystem. The `data/` volume is only needed for ONNX model files.
+Runtime ONNX and TensorRT artifacts live in the Continuous Tracking Triton
+repositories. The service container contains no model weights. Face embeddings
+and centroids are stored in PostgreSQL; guest images are stored in MinIO.
 
 ---
 
@@ -257,7 +248,7 @@ Do not mock the database. Tests needing a database create a real asyncpg pool an
 
 - **Use `print()`** -- use `logging.getLogger()`
 - **Hardcode thresholds** -- read from config
-- **Import torch** -- uses ONNX Runtime, not PyTorch at inference time
+- **Add a local inference fallback** -- Triton is the sole runtime path
 - **Store embeddings in local files** -- embeddings live in PostgreSQL pgvector; guest images in MinIO
 - **Use em-dashes in documentation** -- use colons, commas, or semicolons
 - **Use bare `except:`** -- log and return a zero value or re-raise as an HTTP exception
@@ -272,4 +263,4 @@ Do not mock the database. Tests needing a database create a real asyncpg pool an
 | --- | --- | --- |
 | PostgreSQL (TimescaleDB + pgvector) | `DATABASE_URL` | Required |
 | MinIO (S3-compatible) | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | Required |
-| NVIDIA GPU + CUDA 12+ | -- | Required for GPU inference |
+| Triton Inference Server | `TRITON_GRPC_URL` | Required |

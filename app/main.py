@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import asyncpg
 from fastapi import FastAPI
 from pgvector.asyncpg import register_vector
+from triton_shared.client import TritonGrpcClient
 
 from app import config
+from app.db.migrate import run_migrations
+from app.routers import enrollment, health, identification, motion
+from app.services.enrollment_store import EnrollmentStore
+from app.services.face_engine import FaceEngine
+from app.services.guest_store import GuestImageStore
+from app.services.minio_client import create_minio_client
+from app.services.motion_detector import MotionDetector
 
 
 async def _init_pool(dsn: str) -> asyncpg.Pool:
@@ -23,7 +31,7 @@ async def _init_pool(dsn: str) -> asyncpg.Pool:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup / shutdown lifecycle hook."""
     log_level = config.get("logging.level", "INFO")
     logging.basicConfig(
@@ -43,54 +51,45 @@ async def lifespan(app: FastAPI):
     pool = await _init_pool(dsn)
     logger.info("Database pool created")
 
-    # Run migrations (idempotent — safe for fresh and existing databases)
-    from app.db.migrate import run_migrations
+    triton_client = None
+    try:
+        # Run migrations (idempotent and safe for fresh or existing databases).
+        applied = await run_migrations(pool)
+        if applied:
+            logger.info("Database migrations applied count=%d", applied)
 
-    applied = await run_migrations(pool)
-    if applied:
-        logger.info("Database migrations applied count=%d", applied)
+        minio_client = create_minio_client()
+        logger.info("MinIO client ready, bucket=%s", minio_client.bucket)
 
-    # MinIO client for guest images
-    from app.services.minio_client import create_minio_client
+        triton_url = str(config.get("face_engine.triton_url", "triton:8701"))
+        triton_timeout_ms = int(config.get("face_engine.triton_timeout_ms", 30_000))
+        triton_client = TritonGrpcClient(triton_url, timeout_ms=triton_timeout_ms)
+        await triton_client.__aenter__()
+        face_engine = FaceEngine(triton_client)
+        await face_engine.validate_models()
+        app.state.face_engine = face_engine
+        app.state.triton_client = triton_client
 
-    minio_client = create_minio_client()
-    logger.info("MinIO client ready, bucket=%s", minio_client.bucket)
+        enrollment_store = EnrollmentStore(pool, face_engine)
+        app.state.enrollment_store = enrollment_store
 
-    # Face engine (blocking GPU init, run in threadpool)
-    from app.services.face_engine import FaceEngine
+        app.state.motion_detector = MotionDetector()
 
-    face_engine = await asyncio.to_thread(FaceEngine)
-    app.state.face_engine = face_engine
+        app.state.guest_store = GuestImageStore(pool, minio_client)
 
-    # Enrollment store (asyncpg + pgvector)
-    from app.services.enrollment_store import EnrollmentStore
-
-    enrollment_store = EnrollmentStore(pool, face_engine)
-    app.state.enrollment_store = enrollment_store
-
-    # Motion detector (stateless, no DB needed)
-    from app.services.motion_detector import MotionDetector
-
-    motion_detector = MotionDetector()
-    app.state.motion_detector = motion_detector
-
-    # Guest image store (MinIO + TimescaleDB)
-    from app.services.guest_store import GuestImageStore
-
-    guest_store = GuestImageStore(pool, minio_client)
-    app.state.guest_store = guest_store
-
-    member_count = await enrollment_store.member_count()
-    logger.info(
-        "Service ready: GPU=%s, enrolled_members=%d",
-        face_engine.gpu_available,
-        member_count,
-    )
-
-    yield
-
-    logger.info("Shutting down Person Identification Service")
-    await pool.close()
+        member_count = await enrollment_store.member_count()
+        logger.info(
+            "Service ready: inference_backend=triton endpoint=%s profile=%s enrolled_members=%d",
+            face_engine.endpoint,
+            face_engine.model_profile,
+            member_count,
+        )
+        yield
+    finally:
+        logger.info("Shutting down Person Identification Service")
+        if triton_client is not None:
+            await triton_client.__aexit__(None, None, None)
+        await pool.close()
 
 
 def create_app() -> FastAPI:
@@ -101,8 +100,6 @@ def create_app() -> FastAPI:
         description="Face recognition and motion direction detection for Cognitive Companion",
         lifespan=lifespan,
     )
-
-    from app.routers import enrollment, health, identification, motion
 
     app.include_router(health.router)
     app.include_router(enrollment.router)

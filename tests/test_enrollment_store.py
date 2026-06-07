@@ -1,5 +1,7 @@
 """Tests for EnrollmentStore with TimescaleDB + pgvector."""
 
+from __future__ import annotations
+
 import os
 
 import asyncpg
@@ -8,7 +10,9 @@ import pytest
 import pytest_asyncio
 from pgvector.asyncpg import register_vector
 
-from app.services.enrollment_store import EnrollmentStore, ensure_schema
+from app.db.migrate import run_migrations
+from app.services.enrollment_store import EnrollmentStore
+from app.services.face_models import DetectedFace
 
 TEST_DSN = os.getenv(
     "DATABASE_URL",
@@ -35,7 +39,7 @@ async def pool():
         await register_vector(conn)
 
     pool = await asyncpg.create_pool(TEST_DSN, init=_init, min_size=1, max_size=3)
-    await ensure_schema(pool)
+    await run_migrations(pool)
     yield pool
     # Clean up test data
     async with pool.acquire() as conn:
@@ -53,12 +57,10 @@ async def store(pool):
     class _FakeFaceEngine:
         """Fake FaceEngine that returns synthetic 512-dim embeddings."""
 
-        def detect_faces(self, image: np.ndarray):
+        async def detect_faces(self, image: np.ndarray) -> list[DetectedFace]:
             rng = np.random.RandomState(42)
             embedding = rng.randn(512).astype(np.float32)
             embedding = embedding / np.linalg.norm(embedding)
-
-            from app.services.face_models import DetectedFace
 
             return [
                 DetectedFace(
@@ -98,7 +100,7 @@ class TestEnrollmentStore:
         """Images where no face is detected should fail gracefully."""
 
         class _NoFaceEngine:
-            def detect_faces(self, image):
+            async def detect_faces(self, image):
                 return []
 
         store_no_face = EnrollmentStore(store._pool, _NoFaceEngine())
@@ -174,7 +176,7 @@ class TestEnrollmentStore:
         assert result.status == "enrolled"
 
         # Re-detect and identify
-        faces = store._engine.detect_faces(img)
+        faces = await store._engine.detect_faces(img)
         identity = await store.identify(faces[0].embedding)
 
         assert identity.person_id == "test-8"
@@ -208,7 +210,7 @@ class TestEnrollmentStore:
         img = np.zeros((480, 640, 3), dtype=np.uint8)
         await store.enroll("test-9", "Ivy", [img])
 
-        faces = store._engine.detect_faces(img)
+        faces = await store._engine.detect_faces(img)
         faces[0].bbox = [10.0, 20.0, 100.0, 120.0]
 
         results = await store.identify_all(faces)

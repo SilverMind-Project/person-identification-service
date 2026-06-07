@@ -1,6 +1,6 @@
 # Person Identification Service – Docker Compose
 #
-# GPU-accelerated face recognition microservice.
+# Triton-backed face recognition microservice.
 #
 # Usage:
 #   docker compose up -d
@@ -8,7 +8,7 @@
 # Prerequisites:
 #   - Shared PostgreSQL:  cd ../db && docker compose up -d
 #   - MinIO object storage (external, reachable at MINIO_ENDPOINT)
-#   - NVIDIA Container Toolkit (nvidia-ctk)
+#   - Continuous Tracking Triton service on the shared nanai network
 #
 # Configuration is driven by config/settings.yaml and the required secrets
 # provided to Docker Compose.
@@ -30,14 +30,8 @@ services:
       MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY:?err}"
       MINIO_SECRET_KEY: "${MINIO_SECRET_KEY:?err}"
       MINIO_BUCKET: "${MINIO_BUCKET:?err}"
-      CUDA_DEVICE_ID: "0"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      TRITON_GRPC_URL: "${TRITON_GRPC_URL:-triton:8701}"
+      PERSON_ID_MODEL_PROFILE: "${PERSON_ID_MODEL_PROFILE:-full}"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health')"]
       interval: 30s

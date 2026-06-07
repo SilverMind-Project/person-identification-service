@@ -45,7 +45,7 @@ async def identify(request: Request, body: IdentifyRequest):
     store = request.app.state.enrollment_store
 
     image = decode_base64_image(body.image)
-    faces = engine.detect_faces(image)
+    faces = await engine.detect_faces(image)
     identities = await store.identify_all(faces)
 
     # Save the full image if any unidentified guests are present
@@ -127,7 +127,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
 
         decoded_images.append(image)
         frame_shapes.append((image.shape[0], image.shape[1]))
-        faces = engine.detect_faces(image)
+        faces = await engine.detect_faces(image)
         identities = await store.identify_all(faces)
         all_faces.append(faces)
         all_identities.append(identities)

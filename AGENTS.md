@@ -8,11 +8,11 @@ If a fact appears here, it traces to a file in this tree at the time of writing.
 
 ## 1. Mission and scope
 
-Person Identification Service is a GPU-accelerated face recognition and motion direction detection microservice for the Cognitive Companion system. It ingests base64-encoded camera frames via a REST API and returns identities, confidence scores, bounding boxes, and motion direction classifications.
+Person Identification Service is a Triton-backed face recognition and motion direction detection microservice for the Cognitive Companion system. It ingests base64-encoded camera frames via a REST API and returns identities, confidence scores, bounding boxes, and motion direction classifications.
 
 Two characteristics make this service non-trivial:
 
-1. **GPU model lifecycle.** InsightFace models (SCRFD detection + ArcFace recognition, 341 MB total) are loaded once at startup and held in GPU memory for the process lifetime. Initialization must run in a threadpool to avoid blocking the event loop.
+1. **Remote model lifecycle.** All five Buffalo_L graphs are served by Triton. Startup fails unless every configured model is ready.
 2. **Vector similarity search.** Face identification uses nearest-centroid search against a pgvector DiskANN index, replacing the older in-memory `.npy` gallery approach. The database is the source of truth for enrollment state.
 
 ---
@@ -24,9 +24,9 @@ Two characteristics make this service non-trivial:
 | Backend | Python 3.12, FastAPI, Pydantic 2, stdlib `logging` |
 | Database | PostgreSQL with TimescaleDB + pgvector extensions; asyncpg driver with `pgvector` package for vector codec |
 | Object storage | MinIO (S3-compatible) via `boto3` |
-| Face AI | InsightFace 0.7.3 `buffalo_l` model pack (SCRFD + ArcFace) |
-| Inference runtime | ONNX Runtime 1.24 with CUDAExecutionProvider |
-| Image processing | OpenCV (`opencv-python-headless`), scikit-image |
+| Face AI | Buffalo_L: SCRFD, ArcFace, 2D/3D landmarks, gender/age |
+| Inference runtime | NVIDIA Triton Inference Server over gRPC |
+| Image processing | OpenCV (`opencv-python-headless`) |
 | Package manager | `uv` (`uv.lock` is committed) |
 | Lint and types | `ruff`; `mypy` gradual typing |
 
@@ -51,7 +51,7 @@ person-identification-service/
 │   │   ├── identification.py # POST /identify, POST /identify-batch
 │   │   └── motion.py        # POST /detect-motion
 │   └── services/
-│       ├── face_engine.py     # InsightFace FaceAnalysis wrapper
+│       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
 │       ├── enrollment_store.py # pgvector gallery management: enroll, identify, remove
 │       ├── minio_client.py    # boto3 S3 wrapper for MinIO
@@ -69,8 +69,8 @@ person-identification-service/
 │   ├── test_guest_store.py
 │   └── test_dependencies.py
 ├── pyproject.toml           # Build config, deps, tool configs
-├── Dockerfile               # Multi-stage CUDA build
-├── docker-compose.yml       # GPU service definition
+├── Dockerfile               # Accelerator-independent API build
+├── docker-compose.yml       # API service definition
 ├── CLAUDE.md                # Agent quick-reference
 └── README.md                # Human-facing documentation
 ```
@@ -85,11 +85,10 @@ Run from the repository root unless noted.
 # Development server
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8200 --reload
 
-# GPU build (default)
 uv sync
 
-# CPU-only (development/testing without GPU)
-uv sync --extra cpu
+# Offline conversion and validation tools
+uv sync --extra model-tools
 
 # Code quality
 uv run ruff check .              # Lint
@@ -151,11 +150,11 @@ In `app.main` lifespan (order matters):
 2. `_init_pool(dsn)` -- asyncpg pool with `pgvector` vector codec registered (`min_size=1, max_size=5`)
 3. `run_migrations(pool)` -- applies pending `migrations/*.up.sql` files transactionally
 4. `create_minio_client()` -- MinIO client with bucket-ensured
-5. `FaceEngine()` in `run_in_executor()` -- InsightFace model load blocks; must run in threadpool
+5. Open `TritonGrpcClient` and require all five configured models to be ready
 6. `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
 7. Store on `app.state`: `face_engine`, `enrollment_store`, `motion_detector`, `guest_store`
-8. Log GPU availability and member count
-9. On shutdown: `await pool.close()`
+8. Log Triton endpoint/profile and member count
+9. On shutdown: close Triton, then close the database pool
 
 ### 5.4 Configuration
 
@@ -176,19 +175,20 @@ All secrets (database DSN, MinIO credentials) come from environment variables. T
 
 ### 6.1 FaceEngine (`app/services/face_engine.py`)
 
-Wraps InsightFace's `FaceAnalysis` class. Configured with `CUDAExecutionProvider` only -- no CPU fallback at the ONNX Runtime level (configure `ctx_id=-1` for CPU mode instead).
+Implements the Buffalo_L client contract over Triton. There is no local ONNX Runtime path and no partial-model fallback.
 
 ```python
-engine = FaceEngine()
-faces: list[DetectedFace] = engine.detect_faces(image)  # image is BGR numpy array
+engine = FaceEngine(triton_client)
+await engine.validate_models()
+faces: list[DetectedFace] = await engine.detect_faces(image)
 similarity: float = FaceEngine.compute_similarity(emb1, emb2)  # static
 ```
 
 **Key details:**
-- `det_size: [640, 640]` -- larger = more accurate but slower
+- `det_size: [640, 640]` is required by the SCRFD Triton contract
 - `det_threshold: 0.6` -- filters low-confidence detections
-- Returns `DetectedFace` dataclass: `bbox`, `embedding` (np.ndarray), `det_score`, `landmarks`
-- Embedding is already L2-normalized by InsightFace
+- Returns `DetectedFace` with bounding box, normalized embedding, landmarks, pose, and attributes
+- SCRFD decode/NMS and ArcFace alignment remain client-side and are unit-tested
 - `compute_similarity` is `np.dot(emb1, emb2)` (valid because embeddings are normalized)
 
 ### 6.2 EnrollmentStore (`app/services/enrollment_store.py`)
@@ -197,7 +197,7 @@ Manages the face gallery in PostgreSQL with pgvector. Replaces the old SQLite + 
 
 **Enroll flow:**
 1. Check if person_id already exists (for "enrolled" vs "updated" status)
-2. For each image: run `engine.detect_faces()` in threadpool, pick largest face by bbox area
+2. For each image: await `engine.detect_faces()`, then pick the largest face by bbox area
 3. INSERT/UPDATE `members` row
 4. INSERT all new embeddings into `embeddings` (TimescaleDB hypertable)
 5. Compute normalized centroid: mean of all embeddings for that person, then L2-normalize
@@ -270,7 +270,7 @@ All endpoints under `/api/v1` prefix. No authentication (this is a LAN-internal 
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/health` | -- | `{"status": "ok", "gpu_available": bool, "enrolled_members": int, "model": str}` |
+| `GET` | `/health` | -- | Triton endpoint/profile, model names, and enrolled count |
 
 ### Enrollment
 
@@ -436,10 +436,10 @@ async def pool():
 2. Write idempotent DDL (use `IF NOT EXISTS`, `IF EXISTS` where appropriate).
 3. The migration runs automatically at next startup via the lifespan.
 
-### 10.4 Upgrade the InsightFace model
+### 10.4 Upgrade the Buffalo_L models
 
-1. Download the new model pack to `data/models/<name>/`.
-2. Update `face_engine.model_name` in `config/settings.yaml`.
+1. Export the full models into `continuous-tracking/triton-models`.
+2. Generate and validate the INT8 variants in `triton-models-jetson`.
 3. The embedding dimension may change (buffalo_l uses 512-dim ArcFace). If it changes, you need a new migration to ALTER the vector column dimension and rebuild the DiskANN index.
 4. Re-enroll all members (embeddings from the old model are incompatible).
 
@@ -451,6 +451,7 @@ async def pool():
 | --- | --- | --- | --- |
 | PostgreSQL (TimescaleDB + pgvector) | `DATABASE_URL` | Required | Face gallery, embeddings, centroids, guest visit records |
 | MinIO (S3-compatible) | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | Required | Guest image object storage |
+| Triton Inference Server | `TRITON_GRPC_URL` | Required | Buffalo_L model execution |
 
 This service does not call other Cognitive Companion microservices. It is called BY the Cognitive Companion backend (as the BFF for person identification).
 
@@ -464,7 +465,7 @@ This service does not call other Cognitive Companion microservices. It is called
 
 **Architecture and layering.**
 - Do not instantiate services in routers. Read from `request.app.state`.
-- Do not run InsightFace model loading on the event loop. Use `run_in_executor()`.
+- Do not add a local inference path or silently skip an unavailable model.
 - Do not store embeddings in local `.npy` files. Use the pgvector `embeddings` and `centroids` tables.
 - Do not save guest images to the local filesystem. Use MinIO via `GuestImageStore`.
 
@@ -479,11 +480,11 @@ This service does not call other Cognitive Companion microservices. It is called
 
 **Dependencies.**
 - Do not add a runtime dependency without updating `pyproject.toml` and running `uv lock`.
-- Do not import `torch`. This service uses ONNX Runtime only.
+- Do not import `torch` or a local inference runtime into the production service.
 
 **Tests.**
 - Do not mock the database. Use a real asyncpg pool.
-- Do not load the real InsightFace model in tests. Use `_FakeFaceEngine`.
+- Do not call a live Triton server in unit tests. Inject a protocol-compatible fake.
 
 **Documentation.**
 - Do not write em-dashes in `.md` files. Use colons, commas, semicolons.

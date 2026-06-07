@@ -62,7 +62,3 @@ def reload() -> None:
     global _settings
     _settings = None
     _load()
-
-
-# Eager load on import
-_load()

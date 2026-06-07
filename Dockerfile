@@ -1,28 +1,26 @@
-# ── Build stage: compile native extensions ───────────────────────
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04 AS build
+# Build the API client independently from the inference accelerator.
+FROM ghcr.io/astral-sh/uv:0.11.17 AS uv
 
-ENV DEBIAN_FRONTEND=noninteractive
+FROM python:3.12-slim AS build
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-dev \
-    python3.12-venv \
-    python3-pip \
-    g++ \
+    ca-certificates \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3.12 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 WORKDIR /build
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# ── Runtime stage: lean production image ─────────────────────────
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
+# Runtime contains no CUDA libraries because Triton owns model execution.
+FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="person-identification-service" \
       org.opencontainers.image.description="Face recognition and motion direction detection" \
@@ -34,18 +32,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH="/opt/venv/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-venv \
     libgl1 \
     libglib2.0-0 \
-    && apt-get purge -y software-properties-common \
-    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the entire virtualenv from the build stage
+# Copy the locked production environment from the build stage.
 COPY --from=build /opt/venv /opt/venv
 
 WORKDIR /app
@@ -53,9 +44,6 @@ WORKDIR /app
 COPY app/ app/
 COPY config/ config/
 COPY migrations/ migrations/
-
-RUN mkdir -p data/models
-COPY data/models/ data/models/
 
 EXPOSE 8200
 

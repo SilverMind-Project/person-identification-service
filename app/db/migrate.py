@@ -34,8 +34,7 @@ async def run_migrations(pool: asyncpg.Pool) -> int:
         applied = {r["version_num"] for r in rows}
 
         if not _MIGRATIONS_DIR.is_dir():
-            logger.warning("migrations_dir_missing path=%s", _MIGRATIONS_DIR)
-            return 0
+            raise FileNotFoundError(f"Migration directory does not exist: {_MIGRATIONS_DIR}")
 
         applied_count = 0
         for f in sorted(_MIGRATIONS_DIR.iterdir()):
@@ -48,9 +47,7 @@ async def run_migrations(pool: asyncpg.Pool) -> int:
             logger.info("applying_migration version=%s file=%s", version, f.name)
             async with conn.transaction():
                 await conn.execute(sql)
-                await conn.execute(
-                    "INSERT INTO alembic_version (version_num) VALUES ($1)", version
-                )
+                await conn.execute("INSERT INTO alembic_version (version_num) VALUES ($1)", version)
             logger.info("migration_applied version=%s", version)
             applied_count += 1
 
