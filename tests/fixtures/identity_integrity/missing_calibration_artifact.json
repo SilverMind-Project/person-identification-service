@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "scenario": "missing_calibration_artifact",
+  "raw_similarity": 0.83,
+  "recognition_state": "recognized",
+  "calibration_artifact_path": null,
+  "target": {
+    "calibrated_confidence": null,
+    "calibration_status": "degraded_missing",
+    "authoritative": false
+  },
+  "current_baseline": {
+    "confidence": 0.83,
+    "confidence_semantics": "raw cosine similarity",
+    "calibration_status_exposed": false
+  }
+}
+

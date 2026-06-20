@@ -1,5 +1,8 @@
 # AGENTS.md
 
+For ArcFace similarity/confidence contracts or calibration work, load
+`/home/sriram/code/nanai/person-identification-service/.claude/skills/face-confidence-calibration/SKILL.md`.
+
 Reference for AI coding agents working in `person-identification-service/`. This document is the canonical, deep guide. `CLAUDE.md` is a tight pointer aimed at the same audience; `README.md` is human-facing.
 
 If a fact appears here, it traces to a file in this tree at the time of writing. Verify before relying on it: `git log` is authoritative for "what changed", and `grep` against `app/` is authoritative for "what exists".

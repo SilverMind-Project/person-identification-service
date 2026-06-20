@@ -8,6 +8,6 @@ data/face_db.sqlite
 dist/
 build/
 .vscode/
-.claude/
+.claude/projects/
 .qwen/
 .kiro/
