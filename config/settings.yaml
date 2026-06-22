@@ -72,6 +72,18 @@ annotation:
   text_thickness: 2
   box_thickness: 2
 
+# ArcFace confidence calibration
+# artifact_path: path to a JSON calibration artifact produced by the
+#   calibration-tools CLI (uv run --extra calibration-tools python -m app.calibration.cli fit ...).
+#   Absent or invalid artifact causes the service to start in degraded_missing state;
+#   calibrated_confidence is null in all responses until a valid artifact is provided.
+# arcface_model_version / preprocessing_version: must match the values embedded
+#   in the artifact; mismatch causes degraded_incompatible and calibrated_confidence=null.
+calibration:
+  artifact_path: "${CALIBRATION_ARTIFACT_PATH:}"
+  arcface_model_version: "${CALIBRATION_ARCFACE_MODEL_VERSION:buffalo_l}"
+  preprocessing_version: "${CALIBRATION_PREPROCESSING_VERSION:v1}"
+
 # Logging
 # Override: LOG_LEVEL=DEBUG
 logging:

@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "artifact_version": "test-isotonic-v1",
+  "method": "isotonic",
+  "arcface_model_version": "buffalo_l",
+  "model_profile": "full",
+  "preprocessing_version": "v1",
+  "fitted_at": "2026-06-01T00:00:00Z",
+  "random_seed": 42,
+  "tool_version": "1.0.0",
+  "fit_dataset_hash": "aabbcc",
+  "val_dataset_hash": "ddeeff",
+  "test_dataset_hash": "112233",
+  "split_counts": {
+    "fit_pairs": 400,
+    "fit_positives": 200,
+    "fit_negatives": 200,
+    "val_pairs": 100,
+    "val_positives": 50,
+    "val_negatives": 50,
+    "test_pairs": 100,
+    "test_positives": 50,
+    "test_negatives": 50,
+    "fit_identities": 20,
+    "val_identities": 5,
+    "test_identities": 5
+  },
+  "metrics": {
+    "brier_score": 0.04,
+    "log_loss": 0.14,
+    "ece": 0.015,
+    "fmr_at_operating_point": 0.01,
+    "fnmr_at_operating_point": 0.07,
+    "operating_point_threshold": 0.80
+  },
+  "coef": null,
+  "intercept": null,
+  "x_knots": [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+  "y_knots": [0.0, 0.02, 0.05, 0.10, 0.20, 0.40, 0.65, 0.85, 0.95, 1.0]
+}

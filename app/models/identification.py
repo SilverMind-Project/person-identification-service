@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class FaceDetection(BaseModel):
@@ -22,6 +22,27 @@ class FaceDetection(BaseModel):
     pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")
     roll_deg: float = Field(default=0.0, description="Head pose roll in degrees")
     det_score: float = Field(default=0.0, description="SCRFD detection confidence score")
+    # M10: ArcFace calibration fields
+    calibrated_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Calibrated match probability from logistic or isotonic regression on ArcFace similarity; null when calibration artifact is missing, incompatible, or invalid",
+    )
+    calibration_status: str = Field(
+        default="degraded_missing",
+        description="ready | degraded_missing | degraded_incompatible | degraded_invalid",
+    )
+    calibration_artifact_version: str | None = Field(default=None)
+    arcface_model_version: str = Field(default="")
+    model_profile: str = Field(default="")
+    preprocessing_version: str = Field(default="")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def raw_similarity(self) -> float:
+        """Normalized-embedding cosine similarity; stable alias for similarity."""
+        return self.similarity
 
 
 class IdentifyRequest(BaseModel):

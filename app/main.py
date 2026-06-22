@@ -12,6 +12,7 @@ from pgvector.asyncpg import register_vector
 from triton_shared.client import TritonGrpcClient
 
 from app import config
+from app.calibration.evaluator import CalibrationEvaluator
 from app.db.migrate import run_migrations
 from app.routers import enrollment, health, identification, motion
 from app.services.enrollment_store import EnrollmentStore
@@ -76,6 +77,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.motion_detector = MotionDetector()
 
         app.state.guest_store = GuestImageStore(pool, minio_client)
+
+        calibration_evaluator = CalibrationEvaluator.from_artifact_path(
+            config.get("calibration.artifact_path", "") or None,
+            expected_arcface_model_version=str(
+                config.get("calibration.arcface_model_version", "")
+            ),
+            expected_model_profile=str(face_engine.model_profile),
+            expected_preprocessing_version=str(
+                config.get("calibration.preprocessing_version", "")
+            ),
+        )
+        app.state.calibration_evaluator = calibration_evaluator
+        logger.info(
+            "Calibration evaluator status=%s artifact_version=%s",
+            calibration_evaluator.health(),
+            calibration_evaluator.artifact_version(),
+        )
 
         member_count = await enrollment_store.member_count()
         logger.info(

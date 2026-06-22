@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration_artifact.schema.json",
+  "title": "ArcFace Calibration Artifact",
+  "description": "Versioned JSON artifact produced by app.calibration.cli fit. Consumed at startup by CalibrationEvaluator. Logistic and isotonic methods are mutually exclusive.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "artifact_version",
+    "method",
+    "arcface_model_version",
+    "model_profile",
+    "preprocessing_version",
+    "fitted_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "JSON schema version. Increment when backward-incompatible fields are added."
+    },
+    "artifact_version": {
+      "type": "string",
+      "description": "UUID v4 generated at fit time. Unique identifier for this artifact."
+    },
+    "method": {
+      "type": "string",
+      "enum": ["logistic", "isotonic"],
+      "description": "Calibration method used."
+    },
+    "arcface_model_version": {
+      "type": "string",
+      "description": "ArcFace model identifier (e.g. buffalo_l). Must match calibration.arcface_model_version in settings.yaml."
+    },
+    "model_profile": {
+      "type": "string",
+      "description": "Model profile (e.g. full, int8). Must match face_engine.model_profile in settings.yaml."
+    },
+    "preprocessing_version": {
+      "type": "string",
+      "description": "Preprocessing pipeline version (e.g. v1). Must match calibration.preprocessing_version in settings.yaml."
+    },
+    "fitted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when this artifact was produced."
+    },
+    "random_seed": {
+      "type": "integer",
+      "description": "Seed used for splitting and logistic regression to ensure reproducibility.",
+      "default": 42
+    },
+    "tool_version": {
+      "type": "string",
+      "description": "Version of the calibration CLI that produced this artifact.",
+      "default": ""
+    },
+    "fit_dataset_hash": {
+      "type": "string",
+      "description": "SHA-256 of the fit partition (sorted similarity/label pairs). Used for data provenance.",
+      "default": ""
+    },
+    "val_dataset_hash": {
+      "type": "string",
+      "description": "SHA-256 of the validation partition.",
+      "default": ""
+    },
+    "test_dataset_hash": {
+      "type": "string",
+      "description": "SHA-256 of the test partition.",
+      "default": ""
+    },
+    "split_counts": {
+      "type": "object",
+      "description": "Pair and identity counts for each partition.",
+      "properties": {
+        "fit_pairs": { "type": "integer", "minimum": 0 },
+        "fit_positives": { "type": "integer", "minimum": 0 },
+        "fit_negatives": { "type": "integer", "minimum": 0 },
+        "val_pairs": { "type": "integer", "minimum": 0 },
+        "val_positives": { "type": "integer", "minimum": 0 },
+        "val_negatives": { "type": "integer", "minimum": 0 },
+        "test_pairs": { "type": "integer", "minimum": 0 },
+        "test_positives": { "type": "integer", "minimum": 0 },
+        "test_negatives": { "type": "integer", "minimum": 0 },
+        "fit_identities": { "type": "integer", "minimum": 0 },
+        "val_identities": { "type": "integer", "minimum": 0 },
+        "test_identities": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Evaluation metrics on the test partition.",
+      "properties": {
+        "brier_score": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 },
+        "log_loss": { "type": ["number", "null"], "minimum": 0.0 },
+        "ece": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 },
+        "fmr_at_operating_point": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 },
+        "fnmr_at_operating_point": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 },
+        "operating_point_threshold": { "type": ["number", "null"], "minimum": 0.0, "maximum": 1.0 }
+      }
+    },
+    "coef": {
+      "type": ["number", "null"],
+      "description": "Logistic regression coefficient (logistic method only)."
+    },
+    "intercept": {
+      "type": ["number", "null"],
+      "description": "Logistic regression intercept (logistic method only)."
+    },
+    "x_knots": {
+      "type": ["array", "null"],
+      "items": { "type": "number" },
+      "description": "Isotonic regression input knots in ascending order (isotonic method only)."
+    },
+    "y_knots": {
+      "type": ["array", "null"],
+      "items": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+      "description": "Isotonic regression output knots in [0,1], non-decreasing (isotonic method only)."
+    }
+  },
+  "if": { "properties": { "method": { "const": "logistic" } } },
+  "then": {
+    "required": ["coef", "intercept"],
+    "properties": {
+      "coef": { "type": "number" },
+      "intercept": { "type": "number" }
+    }
+  },
+  "else": {
+    "required": ["x_knots", "y_knots"],
+    "properties": {
+      "x_knots": { "type": "array", "minItems": 2, "items": { "type": "number" } },
+      "y_knots": { "type": "array", "minItems": 2, "items": { "type": "number" } }
+    }
+  }
+}

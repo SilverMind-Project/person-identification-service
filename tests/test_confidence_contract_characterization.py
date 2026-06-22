@@ -5,17 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from app.models.identification import FaceDetection
 
 _FIXTURE = Path(__file__).parent / "fixtures/identity_integrity/missing_calibration_artifact.json"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M10 removes this xfail when missing calibration fails closed in the API contract",
-)
 def test_missing_calibration_exposes_null_calibrated_confidence() -> None:
     data = json.loads(_FIXTURE.read_text())
     detection = FaceDetection(

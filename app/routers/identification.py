@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, Request
 
+from app import config
 from app.models.identification import (
     BatchIdentifyRequest,
     BatchIdentifyResponse,
@@ -31,6 +32,37 @@ def _encode_image_to_base64(image) -> str:
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
+def _make_face_detection(r, evaluator, active_arcface_version: str, active_model_profile: str, active_preprocessing_version: str) -> FaceDetection:
+    """Build a FaceDetection with calibration fields populated from the evaluator.
+
+    calibrated_confidence is set only for recognized faces; degraded states yield None.
+    Version fields always carry the active service config so CTS can gate on mismatches.
+    """
+    calibrated_confidence: float | None = None
+    if r.recognition_state == "recognized":
+        calibrated_confidence = evaluator.predict(r.similarity)
+
+    return FaceDetection(
+        person_id=r.person_id,
+        name=r.name,
+        confidence=r.confidence,
+        bbox=r.bbox,
+        recognition_state=r.recognition_state,
+        best_candidate_id=r.best_candidate_id,
+        similarity=r.similarity,
+        yaw_deg=r.yaw_deg,
+        pitch_deg=r.pitch_deg,
+        roll_deg=r.roll_deg,
+        det_score=r.det_score,
+        calibrated_confidence=calibrated_confidence,
+        calibration_status=evaluator.health(),
+        calibration_artifact_version=evaluator.artifact_version(),
+        arcface_model_version=active_arcface_version,
+        model_profile=active_model_profile,
+        preprocessing_version=active_preprocessing_version,
+    )
+
+
 @router.post("/identify", response_model=IdentifyResponse)
 async def identify(request: Request, body: IdentifyRequest):
     """Identify faces in a single image."""
@@ -43,6 +75,10 @@ async def identify(request: Request, body: IdentifyRequest):
 
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
+    evaluator = request.app.state.calibration_evaluator
+    active_arcface_version = str(config.get("calibration.arcface_model_version", ""))
+    active_model_profile = str(engine.model_profile)
+    active_preprocessing_version = str(config.get("calibration.preprocessing_version", ""))
 
     image = decode_base64_image(body.image)
     faces = await engine.detect_faces(image)
@@ -62,19 +98,7 @@ async def identify(request: Request, body: IdentifyRequest):
 
     response = IdentifyResponse(
         faces=[
-            FaceDetection(
-                person_id=r.person_id,
-                name=r.name,
-                confidence=r.confidence,
-                bbox=r.bbox,
-                recognition_state=r.recognition_state,
-                best_candidate_id=r.best_candidate_id,
-                similarity=r.similarity,
-                yaw_deg=r.yaw_deg,
-                pitch_deg=r.pitch_deg,
-                roll_deg=r.roll_deg,
-                det_score=r.det_score,
-            )
+            _make_face_detection(r, evaluator, active_arcface_version, active_model_profile, active_preprocessing_version)
             for r in identities
         ],
         annotated_image=annotated_b64,
@@ -106,6 +130,10 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
     motion_detector = request.app.state.motion_detector
+    evaluator = request.app.state.calibration_evaluator
+    active_arcface_version = str(config.get("calibration.arcface_model_version", ""))
+    active_model_profile = str(engine.model_profile)
+    active_preprocessing_version = str(config.get("calibration.preprocessing_version", ""))
 
     frames: list[FrameResult] = []
     all_faces: list[list] = []
@@ -143,19 +171,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
             FrameResult(
                 frame_index=idx,
                 faces=[
-                    FaceDetection(
-                        person_id=r.person_id,
-                        name=r.name,
-                        confidence=r.confidence,
-                        bbox=r.bbox,
-                        recognition_state=r.recognition_state,
-                        best_candidate_id=r.best_candidate_id,
-                        similarity=r.similarity,
-                        yaw_deg=r.yaw_deg,
-                        pitch_deg=r.pitch_deg,
-                        roll_deg=r.roll_deg,
-                        det_score=r.det_score,
-                    )
+                    _make_face_detection(r, evaluator, active_arcface_version, active_model_profile, active_preprocessing_version)
                     for r in identities
                 ],
             )

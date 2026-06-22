@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "artifact_version": "test-logistic-v1",
+  "method": "logistic",
+  "arcface_model_version": "buffalo_l",
+  "model_profile": "full",
+  "preprocessing_version": "v1",
+  "fitted_at": "2026-06-01T00:00:00Z",
+  "random_seed": 42,
+  "tool_version": "1.0.0",
+  "fit_dataset_hash": "aabbcc",
+  "val_dataset_hash": "ddeeff",
+  "test_dataset_hash": "112233",
+  "split_counts": {
+    "fit_pairs": 400,
+    "fit_positives": 200,
+    "fit_negatives": 200,
+    "val_pairs": 100,
+    "val_positives": 50,
+    "val_negatives": 50,
+    "test_pairs": 100,
+    "test_positives": 50,
+    "test_negatives": 50,
+    "fit_identities": 20,
+    "val_identities": 5,
+    "test_identities": 5
+  },
+  "metrics": {
+    "brier_score": 0.05,
+    "log_loss": 0.15,
+    "ece": 0.02,
+    "fmr_at_operating_point": 0.01,
+    "fnmr_at_operating_point": 0.08,
+    "operating_point_threshold": 0.80
+  },
+  "coef": 5.0,
+  "intercept": -2.0,
+  "x_knots": null,
+  "y_knots": null
+}
