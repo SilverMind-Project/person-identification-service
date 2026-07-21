@@ -84,6 +84,21 @@ calibration:
   arcface_model_version: "${CALIBRATION_ARCFACE_MODEL_VERSION:buffalo_l}"
   preprocessing_version: "${CALIBRATION_PREPROCESSING_VERSION:v1}"
 
+# Visitor clustering (identity-continuity M06)
+# Persists unmatched face embeddings, clusters them across visits, and lets a
+# caregiver name a recurring visitor (nurse, handyman) into a household member.
+# Only named clusters ever enter live tracking (D7).
+visitors:
+  clustering_enabled: true
+  min_detection_score: 0.6
+  min_face_px: 64
+  member_margin: 0.05
+  cluster_join_threshold: 0.55
+  surface_min_days: 3
+  surface_window_days: 30
+  unnamed_retention_days: 60
+  enroll_top_k: 5
+
 # Logging
 # Override: LOG_LEVEL=DEBUG
 logging:

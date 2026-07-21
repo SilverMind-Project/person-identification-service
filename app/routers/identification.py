@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from datetime import UTC, datetime
 
 import cv2
 import numpy as np
@@ -20,10 +21,34 @@ from app.models.identification import (
     PersonMotion,
 )
 from app.services.face_engine import decode_base64_image
+from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
+from app.services.visitor_store import VisitorStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["identification"])
+
+
+async def _ingest_unknown_faces(
+    visitor_store: VisitorStore,
+    image: np.ndarray,
+    faces: list[DetectedFace],
+    identities: list[IdentifyResult],
+) -> None:
+    """Persist unmatched faces as visitor sightings. Never breaks the response.
+
+    Gated entirely inside VisitorStore (visitors.clustering_enabled); this
+    runs unconditionally on every unknown face, independent of the
+    save_guest_images request flag (guest full-frame saving stays separate).
+    """
+    seen_at = datetime.now(UTC)
+    for face, identity in zip(faces, identities, strict=True):
+        if identity.person_id != "unknown":
+            continue
+        try:
+            await visitor_store.record_sighting(image, face, identity, seen_at=seen_at)
+        except Exception:
+            logger.exception("Visitor sighting ingest failed; continuing")
 
 
 def _encode_image_to_base64(image) -> str:
@@ -83,6 +108,8 @@ async def identify(request: Request, body: IdentifyRequest):
     image = decode_base64_image(body.image)
     faces = await engine.detect_faces(image)
     identities = await store.identify_all(faces)
+
+    await _ingest_unknown_faces(request.app.state.visitor_store, image, faces, identities)
 
     # Save the full image if any unidentified guests are present
     if body.save_guest_images:
@@ -159,6 +186,8 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
         identities = await store.identify_all(faces)
         all_faces.append(faces)
         all_identities.append(identities)
+
+        await _ingest_unknown_faces(request.app.state.visitor_store, image, faces, identities)
 
         # Save the full image if any unidentified guests are present
         if body.save_guest_images:

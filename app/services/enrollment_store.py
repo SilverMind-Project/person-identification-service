@@ -10,6 +10,7 @@ import numpy as np
 
 from app import config
 from app.models.enrollment import EnrollResult, MemberInfo
+from app.services.centroid import insert_embeddings, recompute_member_centroid
 from app.services.face_models import DetectedFace, IdentifyResult
 
 logger = logging.getLogger(__name__)
@@ -95,33 +96,15 @@ class EnrollmentStore:
                 )
                 status = "enrolled"
 
-            # Insert new embeddings
-            for emb in embeddings:
-                await conn.execute(
-                    "INSERT INTO embeddings (person_id, embedding) VALUES ($1, $2)",
-                    person_id,
-                    emb,
-                )
+            # Insert new embeddings and recompute the centroid (shared with
+            # visitor-cluster naming; see app.services.centroid).
+            await insert_embeddings(conn, person_id, embeddings)
+            await recompute_member_centroid(conn, person_id)
 
-            # Recompute centroid: load all embeddings for this person
-            rows = await conn.fetch(
-                "SELECT embedding FROM embeddings WHERE person_id = $1", person_id
+            row = await conn.fetchrow(
+                "SELECT count(*) AS cnt FROM embeddings WHERE person_id = $1", person_id
             )
-            all_embeddings = [r["embedding"] for r in rows]
-            centroid = np.mean(all_embeddings, axis=0)
-            centroid = centroid / np.linalg.norm(centroid)
-
-            # Upsert centroid
-            await conn.execute(
-                """INSERT INTO centroids (person_id, centroid, updated_at)
-                   VALUES ($1, $2, now())
-                   ON CONFLICT (person_id)
-                   DO UPDATE SET centroid = excluded.centroid, updated_at = now()""",
-                person_id,
-                centroid,
-            )
-
-            total_count = len(all_embeddings)
+            total_count = row["cnt"]
             logger.info(
                 "Enrolled person_id=%s name=%s embeddings=%d status=%s",
                 person_id,

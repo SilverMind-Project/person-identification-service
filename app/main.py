@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,12 +16,28 @@ from triton_shared.client import TritonGrpcClient
 from app import config
 from app.calibration.evaluator import CalibrationEvaluator
 from app.db.migrate import run_migrations
-from app.routers import enrollment, health, identification, motion
+from app.routers import enrollment, health, identification, motion, visitors
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_engine import FaceEngine
 from app.services.guest_store import GuestImageStore
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
+from app.services.visitor_store import VisitorStore
+
+_RETENTION_INTERVAL_S = 24 * 60 * 60
+
+
+async def _retention_loop(visitor_store: VisitorStore) -> None:
+    """Daily loop that purges expired unnamed visitor clusters."""
+    logger = logging.getLogger(__name__)
+    while True:
+        try:
+            await asyncio.sleep(_RETENTION_INTERVAL_S)
+            await visitor_store.purge_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Visitor cluster retention job failed")
 
 
 async def _init_pool(dsn: str) -> asyncpg.Pool:
@@ -53,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Database pool created")
 
     triton_client = None
+    retention_task: asyncio.Task | None = None
     try:
         # Run migrations (idempotent and safe for fresh or existing databases).
         applied = await run_migrations(pool)
@@ -77,6 +96,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.motion_detector = MotionDetector()
 
         app.state.guest_store = GuestImageStore(pool, minio_client)
+
+        visitor_store = VisitorStore(pool, minio_client)
+        app.state.visitor_store = visitor_store
+        retention_task = asyncio.create_task(_retention_loop(visitor_store))
 
         calibration_evaluator = CalibrationEvaluator.from_artifact_path(
             config.get("calibration.artifact_path", "") or None,
@@ -105,6 +128,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         logger.info("Shutting down Person Identification Service")
+        if retention_task is not None:
+            retention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retention_task
         if triton_client is not None:
             await triton_client.__aexit__(None, None, None)
         await pool.close()
@@ -121,6 +148,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(enrollment.router)
+    app.include_router(visitors.router)
     app.include_router(identification.router)
     app.include_router(motion.router)
 
