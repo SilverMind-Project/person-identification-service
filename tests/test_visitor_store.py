@@ -382,6 +382,39 @@ class TestNamingAndMerge:
         with pytest.raises(ValueError, match="already exists"):
             await store.name_cluster(cluster_id, "alice", "Alice Again")
 
+    async def test_name_cluster_retry_same_person_id_is_idempotent(self, store, pool):
+        """A caller retrying a naming call after a downstream failure (identity-
+        continuity M07's two-system naming transaction) must see success, not a
+        conflict, when the cluster is already named to the same person_id."""
+        emb = _embedding(71)
+        cluster_id = await store.record_sighting(
+            np.zeros((200, 200, 3), dtype=np.uint8), _face(emb), _unknown_identity()
+        )
+        first = await store.name_cluster(cluster_id, "nurse-priya", "Nurse Priya")
+
+        retry = await store.name_cluster(cluster_id, "nurse-priya", "Nurse Priya")
+        assert retry.status == "named"
+        assert retry.named_person_id == "nurse-priya"
+        assert retry.embedding_count == first.embedding_count
+
+        async with pool.acquire() as conn:
+            member_count = await conn.fetchval(
+                "SELECT count(*) FROM members WHERE person_id = $1", "nurse-priya"
+            )
+            embedding_count = await conn.fetchval(
+                "SELECT count(*) FROM embeddings WHERE person_id = $1", "nurse-priya"
+            )
+        assert member_count == 1
+        assert embedding_count == first.embedding_count
+
+    async def test_name_cluster_retry_different_person_id_conflicts(self, store, pool):
+        cluster_id = await store.record_sighting(
+            np.zeros((200, 200, 3), dtype=np.uint8), _face(_embedding(72)), _unknown_identity()
+        )
+        await store.name_cluster(cluster_id, "nurse-priya", "Nurse Priya")
+        with pytest.raises(ValueError, match="already named"):
+            await store.name_cluster(cluster_id, "someone-else", "Someone Else")
+
     async def test_merge_clusters_recomputes_centroid(self, store, pool):
         base = _embedding(90)
         orthogonal = _embedding_at_similarity(base, target_sim=0.0, seed=91)

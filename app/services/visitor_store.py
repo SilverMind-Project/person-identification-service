@@ -351,7 +351,26 @@ class VisitorStore:
             if row is None:
                 raise LookupError(f"cluster '{cluster_id}' not found")
             if row["status"] == "named":
-                raise ValueError(f"cluster '{cluster_id}' is already named")
+                if row["named_person_id"] != person_id:
+                    raise ValueError(f"cluster '{cluster_id}' is already named")
+                # Idempotent retry of a naming call that already committed: the
+                # caller (identity-continuity M07's BFF naming transaction) must
+                # be able to retry safely after a downstream failure without
+                # this being treated as a conflict. Return the existing state
+                # rather than re-inserting embeddings or touching the cluster row.
+                member_row = await conn.fetchrow(
+                    "SELECT name FROM members WHERE person_id = $1", person_id
+                )
+                embedding_count = await conn.fetchval(
+                    "SELECT count(*) FROM embeddings WHERE person_id = $1", person_id
+                )
+                return NameClusterResponse(
+                    cluster_id=cluster_id,
+                    status="named",
+                    named_person_id=person_id,
+                    member_name=member_row["name"] if member_row else name,
+                    embedding_count=embedding_count or 0,
+                )
 
             existing = await conn.fetchrow(
                 "SELECT 1 FROM members WHERE person_id = $1", person_id
