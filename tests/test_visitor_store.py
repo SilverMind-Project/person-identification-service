@@ -301,7 +301,7 @@ class TestDismissAndRetention:
             )
             assert joined == cluster_id
 
-        # ...but the cluster never re-promotes to surfaced despite 3 distinct days.
+        #...but the cluster never re-promotes to surfaced despite 3 distinct days.
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT status, distinct_days FROM visitor_clusters WHERE cluster_id = $1",

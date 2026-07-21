@@ -86,7 +86,6 @@ async def pool():
 
     pool = await asyncpg.create_pool(TEST_DSN, init=_init, min_size=1, max_size=3)
     await run_migrations(pool)
-    yield pool
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM visitor_sightings")
         await conn.execute("DELETE FROM visitor_clusters")
@@ -94,6 +93,7 @@ async def pool():
         await conn.execute("DELETE FROM embeddings")
         await conn.execute("DELETE FROM centroids")
         await conn.execute("DELETE FROM members")
+    yield pool
     await pool.close()
 
 

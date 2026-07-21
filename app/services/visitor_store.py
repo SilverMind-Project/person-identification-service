@@ -354,7 +354,7 @@ class VisitorStore:
                 if row["named_person_id"] != person_id:
                     raise ValueError(f"cluster '{cluster_id}' is already named")
                 # Idempotent retry of a naming call that already committed: the
-                # caller (identity-continuity M07's BFF naming transaction) must
+                # caller's BFF naming transaction must
                 # be able to retry safely after a downstream failure without
                 # this being treated as a conflict. Return the existing state
                 # rather than re-inserting embeddings or touching the cluster row.

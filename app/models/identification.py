@@ -22,7 +22,7 @@ class FaceDetection(BaseModel):
     pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")
     roll_deg: float = Field(default=0.0, description="Head pose roll in degrees")
     det_score: float = Field(default=0.0, description="SCRFD detection confidence score")
-    # M10: ArcFace calibration fields
+    # ArcFace calibration fields
     calibrated_confidence: float | None = Field(
         default=None,
         ge=0.0,
