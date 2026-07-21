@@ -263,6 +263,29 @@ Draws bounding boxes and labels on a copy of the input image:
 - All colors, scales, thicknesses configurable via `annotation.*` settings
 - Returns a new numpy array; input image is not mutated
 
+### 6.7 VisitorStore (`app/services/visitor_store.py`)
+
+Manages the visitor clustering subsystem (M06) for recurring unknown visitors.
+
+**Tables:**
+- `visitor_clusters`: tracks `cluster_id`, `status` (`candidate`, `surfaced`, `named`, `dismissed`), `distinct_days`, and the running-mean centroid.
+- `visitor_sightings`: hypertable for each observed face crop (MinIO key) and embedding.
+
+**Config keys (`config.visitors.*`):**
+- `clustering_enabled`: Master toggle.
+- `min_detection_score` (0.6), `min_face_px` (64): Quality gates.
+- `member_margin` (0.05): Member-margin fail-closed rule. A borderline match against the household (similarity > recognition.threshold - member_margin) is explicitly rejected from visitor clustering to prevent a known member from seeding a visitor cluster.
+- `cluster_join_threshold` (0.55): Looser than recognition.
+- `surface_min_days` (3), `surface_window_days` (30): Promotion criteria.
+- `unnamed_retention_days` (60): Retention period.
+- `enroll_top_k` (5): Embeddings copied on naming.
+
+**Retention:**
+An async daily task deletes unnamed (`candidate`/`surfaced`/`dismissed`) clusters whose `last_seen_at` is older than `unnamed_retention_days` (60), including sightings and MinIO crops. Named clusters are exempt.
+
+**Naming is privileged:**
+The API exposes `/api/v1/visitors/clusters/{id}/name`. Naming is the single privileged transition: it moves biometric data from the visitor dataset into the enrollment dataset. Enrollment gains entries ONLY via explicit enroll calls or explicit operator naming of a visitor cluster; never automatically.
+
 ---
 
 ## 7. API surface
