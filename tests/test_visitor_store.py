@@ -5,7 +5,6 @@ Identity-continuity M06.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -15,17 +14,19 @@ import pytest_asyncio
 from pgvector.asyncpg import register_vector
 
 from app.db.migrate import run_migrations
+from app.services.enrollment_repository import PostgresEnrollmentRepository
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
+from tests.db import safe_test_dsn
+from tests.gallery import DEFAULT_THRESHOLDS
 
-TEST_DSN = os.getenv(
-    "DATABASE_URL",
-    "postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification",
-)
+TEST_DSN = safe_test_dsn()
 
 
 async def _can_connect() -> bool:
+    if TEST_DSN is None:
+        return False
     try:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()
@@ -488,7 +489,9 @@ class TestMilestoneCompletionCriterion:
             async def detect_faces(self, image):
                 return []
 
-        enrollment_store = EnrollmentStore(pool, _NoOpFaceEngine())
+        enrollment_store = EnrollmentStore(
+            PostgresEnrollmentRepository(pool), _NoOpFaceEngine(), DEFAULT_THRESHOLDS
+        )
         identified = await enrollment_store.identify(nurse_base)
         assert identified.person_id == "nurse-priya"
         assert identified.recognition_state == "recognized"

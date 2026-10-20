@@ -1,0 +1,327 @@
+{
+ "empty_gallery": [
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": null,
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "unrecognized",
+   "roll_deg": 1.5,
+   "similarity": 0.0,
+   "yaw_deg": 12.5
+  }
+ ],
+ "enroll": [
+  {
+   "embedding_count": 3,
+   "failed_images": [],
+   "name": "Resident Alpha",
+   "person_id": "resident-alpha",
+   "status": "enrolled"
+  },
+  {
+   "embedding_count": 2,
+   "failed_images": [],
+   "name": "Resident Beta",
+   "person_id": "resident-beta",
+   "status": "enrolled"
+  },
+  {
+   "embedding_count": 1,
+   "failed_images": [],
+   "name": "Resident Gamma",
+   "person_id": "resident-gamma",
+   "status": "enrolled"
+  },
+  {
+   "embedding_count": 4,
+   "failed_images": [
+    1
+   ],
+   "name": "Alpha Renamed",
+   "person_id": "resident-alpha",
+   "status": "updated"
+  },
+  {
+   "embedding_count": 0,
+   "failed_images": [
+    0
+   ],
+   "name": "Delta",
+   "person_id": "resident-delta",
+   "status": "failed"
+  }
+ ],
+ "get_beta": [
+  "resident-beta",
+  "Resident Beta",
+  2
+ ],
+ "get_missing": true,
+ "identify": [
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-alpha",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Alpha Renamed",
+   "person_id": "resident-alpha",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "recognized",
+   "roll_deg": 1.5,
+   "similarity": 0.95,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-alpha",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Alpha Renamed",
+   "person_id": "resident-alpha",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "recognized",
+   "roll_deg": 1.5,
+   "similarity": 0.41,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-beta",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "candidate",
+   "roll_deg": 1.5,
+   "similarity": 0.39,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-beta",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "candidate",
+   "roll_deg": 1.5,
+   "similarity": 0.26,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-gamma",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "unrecognized",
+   "roll_deg": 1.5,
+   "similarity": 0.24,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-gamma",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "unrecognized",
+   "roll_deg": 1.5,
+   "similarity": 0.1,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-alpha",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "unrecognized",
+   "roll_deg": 1.5,
+   "similarity": 0.02187,
+   "yaw_deg": 12.5
+  },
+  {
+   "bbox": [
+    20.0,
+    30.0,
+    90.0,
+    110.0
+   ],
+   "best_candidate_id": "resident-gamma",
+   "det_score": 0.93,
+   "face_height_px": 80.0,
+   "face_width_px": 70.0,
+   "interocular_px": 30.0,
+   "name": "Guest",
+   "person_id": "unknown",
+   "pitch_deg": -7.0,
+   "quality": {
+    "detection": 0.9,
+    "pitch": 1.0,
+    "resolution": 0.7,
+    "score": 0.61,
+    "sharpness": 0.8,
+    "version": "heuristic-v1"
+   },
+   "recognition_state": "unrecognized",
+   "roll_deg": 1.5,
+   "similarity": -0.52513,
+   "yaw_deg": 12.5
+  }
+ ],
+ "member_count": 3,
+ "member_count_after_remove": 2,
+ "member_count_empty": 0,
+ "members": [
+  {
+   "embedding_count": 4,
+   "name": "Alpha Renamed",
+   "person_id": "resident-alpha"
+  },
+  {
+   "embedding_count": 2,
+   "name": "Resident Beta",
+   "person_id": "resident-beta"
+  },
+  {
+   "embedding_count": 1,
+   "name": "Resident Gamma",
+   "person_id": "resident-gamma"
+  }
+ ],
+ "remove_beta": true,
+ "remove_beta_again": false
+}

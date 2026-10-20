@@ -35,8 +35,13 @@ uv run ruff format .
 # Type check
 uv run mypy app/
 
-# Tests
+# Tests (database tests need a *_test database and skip without one; never the service DB)
+export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
 uv run pytest
+
+# Migrations (operators; startup applies pending ones)
+uv run python -m app.db.migrate status
+uv run python -m app.db.migrate rollback --steps 1
 
 # Targeted iteration
 uv run pytest tests/test_enrollment_store.py -v
@@ -79,7 +84,9 @@ app/
     face_models.py     # DetectedFace and IdentifyResult dataclasses
     face_geometry.py   # Face box size and interocular distance from SCRFD eye keypoints (pure)
     face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
-    enrollment_store.py # pgvector gallery: enroll(), identify(), identify_all(), list_members(), remove_member()
+    enrollment_store.py # Orchestration: enroll(), identify(), identify_all(), members (no SQL, no config)
+    enrollment_repository.py # EnrollmentRepository protocol + Postgres and in-memory peers
+    match_policy.py    # classify_match: nearest centroids to recognition state (pure)
     centroid.py        # Shared embedding insert + centroid recompute
     visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
     minio_client.py    # boto3 S3 wrapper: upload_bytes(), generate_presigned_url(), delete_object()
@@ -183,7 +190,7 @@ Tables:
 
 Schema changes: new numbered SQL files in `migrations/` (`NNNN_name.up.sql` plus a matching `.down.sql`) applied by `app.db.migrate.run_migrations()`. `0001_initial_schema` is frozen; never edit it and never drop the database to apply a change. Uses an `alembic_version` tracking table (Alembic-compatible convention). Each migration runs in its own transaction.
 
-In tests: create a real asyncpg pool connected to a test DB. The `EnrollmentStore` and `GuestImageStore` constructors accept the pool directly.
+In tests: create a real asyncpg pool from `tests/db.py::safe_test_dsn()` (`TEST_DATABASE_URL`, a database named `*_test`; never `DATABASE_URL`). `EnrollmentStore` takes an `EnrollmentRepository` (`PostgresEnrollmentRepository(pool)` or `InMemoryEnrollmentRepository()`) plus `MatchThresholds`; `GuestImageStore` takes the pool.
 
 ---
 
@@ -276,7 +283,7 @@ Patterns:
 | `GuestImageStore` | Real asyncpg pool; `_FakeMinioClient` (in-memory dict) |
 | Dependencies | `importlib.metadata.version()` to verify compatible versions |
 
-Do not mock the database. Tests needing a database create a real asyncpg pool and skip if unavailable.
+Do not mock the database. Tests needing a database use `TEST_DATABASE_URL` pointing at a `*_test` database and skip without it; teardowns delete rows, so never point them at the service database.
 
 ---
 

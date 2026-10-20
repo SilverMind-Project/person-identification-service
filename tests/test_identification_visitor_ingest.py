@@ -7,8 +7,6 @@ both endpoints and the DB-level effect is what matters.
 
 from __future__ import annotations
 
-import os
-
 import asyncpg
 import numpy as np
 import pytest
@@ -19,14 +17,14 @@ from app.db.migrate import run_migrations
 from app.routers.identification import _ingest_unknown_faces
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
+from tests.db import safe_test_dsn
 
-TEST_DSN = os.getenv(
-    "DATABASE_URL",
-    "postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification",
-)
+TEST_DSN = safe_test_dsn()
 
 
 async def _can_connect() -> bool:
+    if TEST_DSN is None:
+        return False
     try:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()

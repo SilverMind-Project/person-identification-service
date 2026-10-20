@@ -6,8 +6,6 @@ extended wire schema.
 
 from __future__ import annotations
 
-import os
-
 import asyncpg
 import numpy as np
 import pytest
@@ -16,14 +14,14 @@ from pgvector.asyncpg import register_vector
 
 from app.db.migrate import run_migrations
 from app.models.identification import FaceDetection, IdentifyResponse
+from app.services.enrollment_repository import PostgresEnrollmentRepository
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_engine import _estimate_head_pose
 from app.services.face_models import DetectedFace, IdentifyResult
+from tests.db import safe_test_dsn
+from tests.gallery import DEFAULT_THRESHOLDS
 
-TEST_DSN = os.getenv(
-    "DATABASE_URL",
-    "postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification",
-)
+TEST_DSN = safe_test_dsn()
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +127,8 @@ def _embedding_at_similarity(ref: np.ndarray, target_sim: float) -> np.ndarray:
 
 
 async def _can_connect() -> bool:
+    if TEST_DSN is None:
+        return False
     try:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()
@@ -237,7 +237,9 @@ async def seeded_store(recognition_pool):
         async def detect_faces(self, image):
             return []
 
-    yield EnrollmentStore(recognition_pool, _NoOpFaceEngine())
+    yield EnrollmentStore(
+        PostgresEnrollmentRepository(recognition_pool), _NoOpFaceEngine(), DEFAULT_THRESHOLDS
+    )
 
 
 class TestRecognitionState:

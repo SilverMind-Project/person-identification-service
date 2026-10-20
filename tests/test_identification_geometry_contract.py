@@ -17,9 +17,9 @@ from fastapi.testclient import TestClient
 from app.calibration.evaluator import CalibrationEvaluator
 from app.models.identification import FaceDetection
 from app.routers import identification
-from app.services.enrollment_store import EnrollmentStore
-from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.face_models import DetectedFace
 from app.services.motion_detector import MotionDetector
+from tests.gallery import one_member_store
 
 _IMAGE_WIDTH_PX = 96
 _IMAGE_HEIGHT_PX = 128
@@ -43,23 +43,6 @@ class _FakeEngine:
         ]
 
 
-class _GalleryFreeStore(EnrollmentStore):
-    """Real identify_all carry-forward; the centroid lookup is replaced by a fixed match."""
-
-    def __init__(self) -> None:
-        super().__init__(pool=None, face_engine=_FakeEngine())  # type: ignore[arg-type]
-
-    async def identify(self, embedding: np.ndarray) -> IdentifyResult:
-        return IdentifyResult(
-            person_id="resident-alpha",
-            name="Resident Alpha",
-            bbox=[],
-            best_candidate_id="resident-alpha",
-            similarity=0.62,
-            recognition_state="recognized",
-        )
-
-
 class _NoopVisitorStore:
     async def record_sighting(self, *args: object, **kwargs: object) -> None:
         return None
@@ -77,7 +60,13 @@ def client() -> TestClient:
     app = FastAPI()
     app.include_router(identification.router)
     app.state.face_engine = _FakeEngine()
-    app.state.enrollment_store = _GalleryFreeStore()
+    app.state.enrollment_store = one_member_store(
+        _FakeEngine(),
+        person_id="resident-alpha",
+        name="Resident Alpha",
+        probe=np.eye(512, dtype=np.float32)[0],
+        similarity=0.62,
+    )
     app.state.calibration_evaluator = CalibrationEvaluator(None, "degraded_missing")
     app.state.visitor_store = _NoopVisitorStore()
     app.state.motion_detector = MotionDetector()

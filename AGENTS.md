@@ -118,9 +118,15 @@ uv run ruff check .              # Lint
 uv run ruff format .             # Format
 uv run mypy app/                 # Type check
 
-# Tests
+# Tests. Database tests run only against a database whose name ends in _test, and skip
+# without TEST_DATABASE_URL; they never read DATABASE_URL (their teardown deletes rows).
+export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
 uv run pytest                    # Full suite
 uv run pytest tests/test_enrollment_store.py -v   # Targeted
+
+# Migrations (startup applies pending ones; these are for operators)
+uv run python -m app.db.migrate status
+uv run python -m app.db.migrate rollback --steps 1
 
 # Docker
 docker build -t person-id-service .
@@ -138,6 +144,10 @@ docker compose up -d
 app/models/          Pydantic wire models (request/response schemas)
 app/routers/         FastAPI route handlers (thin: decode, call services, return)
 app/services/        Business logic (FaceEngine, EnrollmentStore, MotionDetector, etc.)
+                     Gallery work is split three ways: persistence behind the
+                     EnrollmentRepository protocol (enrollment_repository.py, Postgres and
+                     in-memory peers), the pure matching policy (match_policy.py), and the thin
+                     EnrollmentStore that sequences engine, repository, and policy.
 app/db/              Database migration runner
 app/main.py          App factory + lifespan (wiring)
 app/config.py        YAML + env-var configuration singleton
@@ -217,26 +227,26 @@ similarity: float = FaceEngine.compute_similarity(emb1, emb2)  # static
 
 ### 6.2 EnrollmentStore (`app/services/enrollment_store.py`)
 
-Manages the face gallery in PostgreSQL with pgvector. Replaces the old SQLite + `.npy` file system.
+Orchestrates enrollment and identification. It holds no SQL and reads no configuration:
+`EnrollmentStore(repository, face_engine, thresholds)` is built in the lifespan from a
+`PostgresEnrollmentRepository(pool)` and `MatchThresholds` read from `recognition.*`.
+
+- **Repository** (`app/services/enrollment_repository.py`): the `EnrollmentRepository` protocol
+  (`nearest_centroids`, member and embedding CRUD, `recompute_centroid`), with
+  `PostgresEnrollmentRepository` and `InMemoryEnrollmentRepository`. The centroid recompute SQL
+  lives once, in `app/services/centroid.py`, because visitor naming runs it inside its own
+  transaction; the Postgres repository delegates to it.
+- **Policy** (`app/services/match_policy.py`): `classify_match(hits, thresholds)` turns the
+  nearest centroids into a `MatchDecision`; pure and table-tested.
 
 **Enroll flow:**
-1. Check if person_id already exists (for "enrolled" vs "updated" status)
+1. Check whether the member exists and how many embeddings it has (reported if every image fails)
 2. For each image: await `engine.detect_faces()`, then pick the largest face by bbox area
-3. INSERT/UPDATE `members` row
-4. INSERT all new embeddings into `embeddings` (TimescaleDB hypertable)
-5. Compute normalized centroid: mean of all embeddings for that person, then L2-normalize
-6. UPSERT into `centroids` table (DiskANN-indexed)
+3. `upsert_member` (reports "enrolled" or "updated"), `insert_embeddings`, `recompute_centroid`
+   (mean of all the member's embeddings, L2-normalized, upserted into `centroids`)
 
-**Identify flow:**
-```sql
-SELECT c.person_id, m.name, 1 - (c.centroid <=> $1) AS similarity
-FROM centroids c
-JOIN members m ON c.person_id = m.person_id
-ORDER BY c.centroid <=> $1
-LIMIT 1
-```
-
-Uses pgvector `<=>` (cosine distance). DiskANN index on `centroids.centroid` provides ANN speedup for large galleries.
+**Identify flow:** `nearest_centroids(embedding, k=1)` (pgvector `<=>` cosine distance, DiskANN
+index on `centroids.centroid`), then `classify_match`.
 
 **Thresholds (raw cosine similarity to the nearest centroid):**
 - `recognition.threshold` (default 0.4): at or above is `recognized` (person_id set)
@@ -444,8 +454,13 @@ Key design decisions:
 5. Records the version number on success.
 
 Each migration filename must start with a zero-padded sequence number (e.g., `0001_`).
-The runner has no rollback command and no lock today, so a `.down.sql` is applied by hand when
-needed; rollback tooling is planned (identity-recognition IR-M05, PR 2).
+Every run, rollback, and status read holds a Postgres advisory lock
+(`pg_advisory_lock(hashtext('person_id_migrations'))`), so replicas starting together apply each
+file once. Every migration after the frozen `0001_initial_schema` ships a `.down.sql`
+(`tests/test_migration_runner.py` enforces it). `python -m app.db.migrate rollback --steps N`
+reverts the newest N, checking every target first: it refuses the baseline and any version
+without a down file, changing nothing. `status` also lists versions recorded in `alembic_version`
+whose files no longer exist (for example the squashed `0002_visitor_clusters`).
 
 ---
 
@@ -459,24 +474,34 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 
 | What you test | Pattern |
 | --- | --- |
-| `EnrollmentStore` | Real asyncpg pool from `asyncpg.create_pool()`; `_FakeFaceEngine` class returning deterministic embeddings via `np.random.RandomState(42)`; cleanup fixture deletes test data after each test |
+| `EnrollmentStore` | Fast tests over `InMemoryEnrollmentRepository` (`tests/test_enrollment_store_inmemory.py`); Postgres behavior through a real pool (`tests/test_enrollment_store.py`); `tests/test_identify_characterization.py` freezes enroll and identify output in a golden file |
+| Repository with an in-memory peer | A parity test runs the same operations on both and compares results (`tests/test_enrollment_repository_parity.py`) |
+| Matching policy | Table-driven boundaries (`tests/test_match_policy.py`) |
+| Migration runner | Probe migrations in a temporary directory against the test database (`tests/test_migration_runner.py`) |
 | `GuestImageStore` | Real asyncpg pool; `_FakeMinioClient` (in-memory dict with `upload_bytes`, `generate_presigned_url`); skips if DB unavailable |
 | Dependency compatibility | `importlib.metadata.version()` to check scikit-image version constraint |
 | Pure policy and geometry (`face_geometry`, `face_quality`, calibration evaluator and fitter) | Table-driven unit tests with no database (`tests/test_face_geometry.py`, `tests/test_face_quality.py`, `tests/test_m10_calibration.py`) |
-| Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); the real `EnrollmentStore.identify_all` carry-forward runs, only the centroid lookup is replaced |
+| Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_dependencies.py`, `test_enrollment_store.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
 
 ### Fixtures
 
-There is no shared `conftest.py`. Each test file constructs its own pool and services:
+There is no shared `conftest.py`. Database tests take their connection string only from
+`tests/db.py::safe_test_dsn()`: it reads `TEST_DATABASE_URL` (never `DATABASE_URL`), returns
+None when unset (the tests skip), and raises for any database whose name does not end in
+`_test`. Database teardowns delete every row they touch; on 2026-10-20 an earlier default to the
+service's own database deleted the household's enrollment.
 
 ```python
-@pytest.fixture
+TEST_DSN = safe_test_dsn()
+
+@pytest_asyncio.fixture
 async def pool():
-    dsn = os.environ.get("TEST_DATABASE_URL", "postgresql://...")
-    p = await asyncpg.create_pool(dsn)
+    if TEST_DSN is None:
+        pytest.skip("TEST_DATABASE_URL not set")
+    p = await asyncpg.create_pool(TEST_DSN, init=_register_vector)
     yield p
     await p.close()
 ```
@@ -484,6 +509,8 @@ async def pool():
 ### What NOT to do in tests
 
 - Do not mock the database; use a real asyncpg pool against a test database.
+- Never point database tests at a database that holds household data, and never add a default
+  connection string to a test.
 - Do not mutate class-level properties with `type(obj).prop = ...`; use local subclasses.
 - Do not use the production MinIO client; use `_FakeMinioClient`.
 - Do not load the real InsightFace model; use `_FakeFaceEngine` with synthetic embeddings.

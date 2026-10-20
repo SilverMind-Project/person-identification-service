@@ -18,14 +18,14 @@ from app import main
 from app.calibration.evaluator import CalibrationEvaluator
 from app.models.identification import FaceDetection
 from app.routers import identification
-from app.services.enrollment_store import EnrollmentStore
-from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.face_models import DetectedFace
 from app.services.face_quality import (
     FaceQualityInputs,
     HeuristicFaceQualityScorer,
     HeuristicQualityParams,
 )
 from app.services.motion_detector import MotionDetector
+from tests.gallery import one_member_store
 
 # Eyes 23 px apart: resolution component 0.5 under the default ramp (10 to 36 px).
 _KEYPOINTS = np.array(
@@ -58,21 +58,6 @@ class _ScoringEngine:
         return [face]
 
 
-class _GalleryFreeStore(EnrollmentStore):
-    def __init__(self) -> None:
-        super().__init__(pool=None, face_engine=_ScoringEngine())  # type: ignore[arg-type]
-
-    async def identify(self, embedding: np.ndarray) -> IdentifyResult:
-        return IdentifyResult(
-            person_id="resident-alpha",
-            name="Resident Alpha",
-            bbox=[],
-            best_candidate_id="resident-alpha",
-            similarity=0.62,
-            recognition_state="recognized",
-        )
-
-
 class _NoopVisitorStore:
     async def record_sighting(self, *args: object, **kwargs: object) -> None:
         return None
@@ -89,7 +74,13 @@ def client() -> TestClient:
     app = FastAPI()
     app.include_router(identification.router)
     app.state.face_engine = _ScoringEngine()
-    app.state.enrollment_store = _GalleryFreeStore()
+    app.state.enrollment_store = one_member_store(
+        _ScoringEngine(),
+        person_id="resident-alpha",
+        name="Resident Alpha",
+        probe=np.eye(512, dtype=np.float32)[0],
+        similarity=0.62,
+    )
     app.state.calibration_evaluator = CalibrationEvaluator(None, "degraded_missing")
     app.state.visitor_store = _NoopVisitorStore()
     app.state.motion_detector = MotionDetector()
@@ -130,6 +121,9 @@ async def test_startup_fails_on_an_unknown_scorer(monkeypatch: pytest.MonkeyPatc
     def _config_get(key: str, default: object | None = None) -> object | None:
         if key == "face_quality":
             return {"scorer": "not-a-scorer"}
+        if key == "database.dsn":
+            # Never let this lifespan reach a real database, whatever the environment holds.
+            return None
         return real_get(key, default)
 
     monkeypatch.setattr(main.config, "get", _config_get)

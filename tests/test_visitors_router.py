@@ -7,7 +7,6 @@ minimal fake Request exposing app.state.
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import asyncpg
@@ -22,14 +21,14 @@ from app.models.visitor import NameClusterRequest
 from app.routers import visitors
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
+from tests.db import safe_test_dsn
 
-TEST_DSN = os.getenv(
-    "DATABASE_URL",
-    "postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification",
-)
+TEST_DSN = safe_test_dsn()
 
 
 async def _can_connect() -> bool:
+    if TEST_DSN is None:
+        return False
     try:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()

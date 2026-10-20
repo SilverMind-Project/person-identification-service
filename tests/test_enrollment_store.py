@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import asyncpg
 import numpy as np
 import pytest
@@ -11,16 +9,18 @@ import pytest_asyncio
 from pgvector.asyncpg import register_vector
 
 from app.db.migrate import run_migrations
+from app.services.enrollment_repository import PostgresEnrollmentRepository
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_models import DetectedFace
+from tests.db import safe_test_dsn
+from tests.gallery import DEFAULT_THRESHOLDS
 
-TEST_DSN = os.getenv(
-    "DATABASE_URL",
-    "postgresql://pid_user:change-me-pid-password@localhost:5432/person_identification",
-)
+TEST_DSN = safe_test_dsn()
 
 
 async def _can_connect() -> bool:
+    if TEST_DSN is None:
+        return False
     try:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()
@@ -71,7 +71,7 @@ async def store(pool):
             ]
 
     engine = _FakeFaceEngine()
-    return EnrollmentStore(pool, engine)
+    return EnrollmentStore(PostgresEnrollmentRepository(pool), engine, DEFAULT_THRESHOLDS)
 
 
 class TestEnrollmentStore:
@@ -96,14 +96,16 @@ class TestEnrollmentStore:
         assert result.status == "updated"
         assert result.embedding_count == 2
 
-    async def test_enroll_no_face_detected(self, store):
+    async def test_enroll_no_face_detected(self, store, pool):
         """Images where no face is detected should fail gracefully."""
 
         class _NoFaceEngine:
             async def detect_faces(self, image):
                 return []
 
-        store_no_face = EnrollmentStore(store._pool, _NoFaceEngine())
+        store_no_face = EnrollmentStore(
+            PostgresEnrollmentRepository(pool), _NoFaceEngine(), DEFAULT_THRESHOLDS
+        )
 
         img = np.zeros((480, 640, 3), dtype=np.uint8)
         result = await store_no_face.enroll("test-noface", "Ghost", [img])

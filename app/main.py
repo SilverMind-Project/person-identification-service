@@ -17,10 +17,12 @@ from app import config
 from app.calibration.evaluator import CalibrationEvaluator
 from app.db.migrate import run_migrations
 from app.routers import enrollment, health, identification, motion, visitors
+from app.services.enrollment_repository import PostgresEnrollmentRepository
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_engine import FaceEngine
 from app.services.face_quality import build_face_quality_scorer
 from app.services.guest_store import GuestImageStore
+from app.services.match_policy import MatchThresholds
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
 from app.services.visitor_store import VisitorStore
@@ -94,7 +96,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.face_engine = face_engine
         app.state.triton_client = triton_client
 
-        enrollment_store = EnrollmentStore(pool, face_engine)
+        enrollment_store = EnrollmentStore(
+            PostgresEnrollmentRepository(pool),
+            face_engine,
+            MatchThresholds(
+                recognized_min_similarity=float(config.get("recognition.threshold", 0.4)),
+                candidate_min_similarity=float(config.get("recognition.unknown_threshold", 0.25)),
+            ),
+        )
         app.state.enrollment_store = enrollment_store
 
         app.state.motion_detector = MotionDetector()

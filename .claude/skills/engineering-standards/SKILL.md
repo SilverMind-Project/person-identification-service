@@ -28,6 +28,9 @@ call) and cognitive-companion (`/identify-batch`, enrollment, visitor admin).
 app/models/      Pydantic v2 wire models (request/response). Boundary validation only.
 app/routers/     Thin FastAPI handlers: decode, call services from request.app.state, map to wire.
 app/services/    Business logic and persistence (FaceEngine, EnrollmentStore, VisitorStore, ...).
+                 Gallery code is split into a repository protocol with Postgres and in-memory
+                 peers (enrollment_repository.py), pure policy (match_policy.py), and a thin
+                 orchestrating service (enrollment_store.py). New gallery features follow it.
 app/calibration/ Offline fitter (scikit-learn, optional extra) and stdlib-only runtime evaluator.
 app/main.py      Lifespan wiring: the single place services are constructed.
 ```
@@ -82,10 +85,10 @@ its default. Comments never cite milestone or decision numbers.
   (`_init_pool` in `app/main.py`); never open a raw connection without it.
 - Migrations are incremental (owner decision 2026-10-20): every new change is a
   `migrations/NNNN_description.up.sql` applied by `app/db/migrate.py` at startup, and ships a
-  matching `.down.sql` that exactly reverses it. Today the runner only applies `.up.sql` files and
-  has no rollback command or lock; rollback tooling and an advisory lock are planned in
-  `/home/sriram/code/nanai/identity-recognition-m05-person-id-matching-layer-refactor.md` (PR 2),
-  so until then a down migration is applied by hand. `0001_initial_schema` is frozen. Never edit
+  matching `.down.sql` that exactly reverses it (`tests/test_migration_runner.py` fails on a
+  missing one). The runner holds an advisory lock; `python -m app.db.migrate status|rollback
+  --steps N` is the operator tool, and rollback refuses the baseline or any version without a down
+  file. `0001_initial_schema` is frozen. Never edit
   an applied migration and never drop the database to apply a change: enrollment and visitor data
   are irreplaceable household data.
 - Write idempotent DDL (`IF NOT EXISTS`). Parameterized SQL only (`$1..$N`).
@@ -110,8 +113,12 @@ its default. Comments never cite milestone or decision numbers.
 ## Testing
 
 - `pytest` with `asyncio_mode = "auto"`. Tests live in `tests/`.
-- Database-backed tests use a real asyncpg pool from `TEST_DATABASE_URL` and skip when it is
-  unavailable. Never mock asyncpg.
+- Database-backed tests use a real asyncpg pool from `tests/db.py::safe_test_dsn()`: only
+  `TEST_DATABASE_URL`, only a database named `*_test`, skipped when unset. Never read
+  `DATABASE_URL` or hardcode a default DSN in a test: teardowns delete rows, and a default to the
+  service database destroyed household enrollment once. Never mock asyncpg.
+- A repository with an in-memory peer has a Postgres parity test running the same operations on
+  both (`tests/test_enrollment_repository_parity.py` is the pattern).
 - Triton is never called in tests; inject a fake implementing the client protocol, and a
   `_FakeFaceEngine` returning deterministic embeddings.
 - Pure policy functions (matching, quality, calibration evaluation) get table-driven unit tests

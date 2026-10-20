@@ -1,17 +1,21 @@
-"""Enrollment store: manages face embedding gallery in TimescaleDB with pgvector + DiskANN."""
+"""Enrollment service: orchestrates the face engine, the gallery repository, and matching policy.
+
+It holds no SQL and reads no configuration. Persistence is an ``EnrollmentRepository``; turning
+nearest centroids into a recognition state is ``classify_match``; this module only sequences them
+and carries detection-level fields onto results.
+"""
 
 from __future__ import annotations
 
 import logging
 from typing import Protocol
 
-import asyncpg
 import numpy as np
 
-from app import config
 from app.models.enrollment import EnrollResult, MemberInfo
-from app.services.centroid import insert_embeddings, recompute_member_centroid
+from app.services.enrollment_repository import EnrollmentRepository
 from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.match_policy import MatchThresholds, classify_match
 
 logger = logging.getLogger(__name__)
 
@@ -21,172 +25,93 @@ class FaceEngineProtocol(Protocol):
 
 
 class EnrollmentStore:
-    """Manages a gallery of enrolled household members with face embeddings.
+    """Enrolls household members and identifies faces against their centroids."""
 
-    Embeddings are stored in TimescaleDB (pgvector). Identification uses
-    pre-computed centroids indexed with StreamingDiskANN via pgvectorscale.
-    """
-
-    def __init__(self, pool: asyncpg.Pool, face_engine: FaceEngineProtocol) -> None:
-        self._pool = pool
+    def __init__(
+        self,
+        repository: EnrollmentRepository,
+        face_engine: FaceEngineProtocol,
+        thresholds: MatchThresholds,
+    ) -> None:
+        self._repository = repository
         self._engine = face_engine
-        self._threshold = float(config.get("recognition.threshold", 0.4))
-        self._unknown_threshold = float(config.get("recognition.unknown_threshold", 0.25))
+        self._thresholds = thresholds
 
     async def enroll(self, person_id: str, name: str, images: list[np.ndarray]) -> EnrollResult:
         """Enroll a new person or add images to an existing member.
 
-        Args:
-            person_id: Unique identifier.
-            name: Display name.
-            images: List of BGR numpy arrays, each containing a face.
-
-        Returns:
-            EnrollResult with status and count of successful embeddings.
+        The largest face in each image is used; images without a face are reported in
+        ``failed_images``. When no image yields a face nothing is written and the status is
+        ``failed``.
         """
-        async with self._pool.acquire() as conn:
-            # Check existing member
-            existing = await conn.fetchrow(
-                "SELECT person_id FROM members WHERE person_id = $1", person_id
+        existing_count = (
+            await self._repository.embedding_count(person_id)
+            if await self._repository.member_exists(person_id)
+            else 0
+        )
+
+        embeddings: list[np.ndarray] = []
+        failed_indices: list[int] = []
+        for idx, img in enumerate(images):
+            faces = await self._engine.detect_faces(img)
+            if not faces:
+                failed_indices.append(idx)
+                continue
+            best_face = max(
+                faces,
+                key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
             )
-            existing_count = 0
-            if existing:
-                row = await conn.fetchrow(
-                    "SELECT count(*) AS cnt FROM embeddings WHERE person_id = $1", person_id
-                )
-                existing_count = row["cnt"]
+            embeddings.append(best_face.embedding)
 
-            # Detect faces (CPU/GPU-bound, run in threadpool)
-            embeddings: list[np.ndarray] = []
-            failed_indices: list[int] = []
-
-            for idx, img in enumerate(images):
-                faces = await self._engine.detect_faces(img)
-                if not faces:
-                    failed_indices.append(idx)
-                    continue
-                best_face = max(
-                    faces,
-                    key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
-                )
-                embeddings.append(best_face.embedding)
-
-            if not embeddings:
-                return EnrollResult(
-                    person_id=person_id,
-                    name=name,
-                    embedding_count=existing_count,
-                    status="failed",
-                    failed_images=failed_indices,
-                )
-
-            # Insert or update member
-            if existing:
-                await conn.execute(
-                    "UPDATE members SET name = $1 WHERE person_id = $2",
-                    name,
-                    person_id,
-                )
-                status = "updated"
-            else:
-                await conn.execute(
-                    "INSERT INTO members (person_id, name) VALUES ($1, $2)",
-                    person_id,
-                    name,
-                )
-                status = "enrolled"
-
-            # Insert new embeddings and recompute the centroid (shared with
-            # visitor-cluster naming; see app.services.centroid).
-            await insert_embeddings(conn, person_id, embeddings)
-            await recompute_member_centroid(conn, person_id)
-
-            row = await conn.fetchrow(
-                "SELECT count(*) AS cnt FROM embeddings WHERE person_id = $1", person_id
-            )
-            total_count = row["cnt"]
-            logger.info(
-                "Enrolled person_id=%s name=%s embeddings=%d status=%s",
-                person_id,
-                name,
-                total_count,
-                status,
-            )
+        if not embeddings:
             return EnrollResult(
                 person_id=person_id,
                 name=name,
-                embedding_count=total_count,
-                status=status,
+                embedding_count=existing_count,
+                status="failed",
                 failed_images=failed_indices,
             )
 
+        status = await self._repository.upsert_member(person_id, name)
+        await self._repository.insert_embeddings(person_id, embeddings)
+        await self._repository.recompute_centroid(person_id)
+
+        total_count = await self._repository.embedding_count(person_id)
+        logger.info(
+            "Enrolled person_id=%s name=%s embeddings=%d status=%s",
+            person_id,
+            name,
+            total_count,
+            status,
+        )
+        return EnrollResult(
+            person_id=person_id,
+            name=name,
+            embedding_count=total_count,
+            status=status,
+            failed_images=failed_indices,
+        )
+
     async def identify(self, embedding: np.ndarray) -> IdentifyResult:
-        """Identify a detected face against the enrolled gallery using DiskANN index.
+        """Identify one face embedding against the nearest enrolled centroid.
 
-        Always returns the best candidate and recognition state, even when
-        similarity is below the recognition threshold.  The three states are:
-
-        - ``recognized``:  similarity >= threshold (strong positive).
-        - ``candidate``:   unknown_threshold <= similarity < threshold (grey zone).
-        - ``unrecognized``: similarity < unknown_threshold (definitely unknown).
-
-        For backward compatibility ``person_id`` stays ``"unknown"`` when below
-        ``threshold``, but ``best_candidate_id`` always carries the nearest centroid.
+        Always returns the nearest member as ``best_candidate_id`` (except for an empty gallery),
+        whatever the recognition state; see ``app.services.match_policy``.
         """
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT m.person_id, m.name,
-                          1.0 - (c.centroid <=> $1::vector) AS similarity
-                   FROM centroids c
-                   JOIN members m ON m.person_id = c.person_id
-                   ORDER BY c.centroid <=> $1::vector
-                   LIMIT 1""",
-                embedding,
-            )
-
-            if row is None:
-                return IdentifyResult(
-                    person_id="unknown",
-                    name="Guest",
-                    bbox=[],
-                    best_candidate_id=None,
-                    similarity=0.0,
-                    recognition_state="unrecognized",
-                )
-
-            similarity = float(row["similarity"])
-            best_id = str(row["person_id"])
-            best_name = str(row["name"])
-
-            if similarity >= self._threshold:
-                recognition_state = "recognized"
-                person_id = best_id
-                name = best_name
-            elif similarity >= self._unknown_threshold:
-                recognition_state = "candidate"
-                person_id = "unknown"
-                name = "Guest"
-            else:
-                recognition_state = "unrecognized"
-                person_id = "unknown"
-                name = "Guest"
-
-            return IdentifyResult(
-                person_id=person_id,
-                name=name,
-                bbox=[],
-                best_candidate_id=best_id,
-                similarity=similarity,
-                recognition_state=recognition_state,
-            )
+        decision = classify_match(
+            await self._repository.nearest_centroids(embedding, k=1), self._thresholds
+        )
+        return IdentifyResult(
+            person_id=decision.person_id,
+            name=decision.name,
+            bbox=[],
+            best_candidate_id=decision.best_candidate_id,
+            similarity=decision.similarity,
+            recognition_state=decision.recognition_state,
+        )
 
     async def identify_all(self, faces: list[DetectedFace]) -> list[IdentifyResult]:
-        """Identify all faces in a single frame.
-
-        Each face gets its own nearest-centroid query so that the DiskANN
-        index is used per embedding. For household-scale galleries this is
-        fast; batch optimizations can be added later if needed.
-        """
+        """Identify every face in a frame, one nearest-centroid query per face."""
         results: list[IdentifyResult] = []
         for face in faces:
             result = await self.identify(face.embedding)
@@ -204,62 +129,18 @@ class EnrollmentStore:
         return results
 
     async def list_members(self) -> list[MemberInfo]:
-        """Return all enrolled members with embedding counts."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT m.person_id, m.name, m.created_at,
-                          count(e.id)::int AS embedding_count
-                   FROM members m
-                   LEFT JOIN embeddings e ON e.person_id = m.person_id
-                   GROUP BY m.person_id, m.name, m.created_at
-                   ORDER BY m.name"""
-            )
-
-        return [
-            MemberInfo(
-                person_id=r["person_id"],
-                name=r["name"],
-                embedding_count=r["embedding_count"],
-                created_at=r["created_at"],
-            )
-            for r in rows
-        ]
+        """All enrolled members with embedding counts."""
+        return await self._repository.list_members()
 
     async def get_member(self, person_id: str) -> MemberInfo | None:
-        """Get details of a specific enrolled member."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT m.person_id, m.name, m.created_at,
-                          count(e.id)::int AS embedding_count
-                   FROM members m
-                   LEFT JOIN embeddings e ON e.person_id = m.person_id
-                   WHERE m.person_id = $1
-                   GROUP BY m.person_id, m.name, m.created_at""",
-                person_id,
-            )
-
-        if not row:
-            return None
-
-        return MemberInfo(
-            person_id=row["person_id"],
-            name=row["name"],
-            embedding_count=row["embedding_count"],
-            created_at=row["created_at"],
-        )
+        return await self._repository.get_member(person_id)
 
     async def remove_member(self, person_id: str) -> bool:
-        """Remove a member and all their embeddings (CASCADE handles centroids too)."""
-        async with self._pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM members WHERE person_id = $1", person_id)
-
-        deleted = result != "DELETE 0"
+        """Remove a member with all their embeddings and their centroid."""
+        deleted = await self._repository.remove_member(person_id)
         if deleted:
             logger.info("Removed member person_id=%s", person_id)
         return deleted
 
     async def member_count(self) -> int:
-        """Return the number of enrolled members."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT count(*) AS cnt FROM members")
-            return row["cnt"]
+        return await self._repository.member_count()
