@@ -22,6 +22,20 @@ class FaceDetection(BaseModel):
     pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")
     roll_deg: float = Field(default=0.0, description="Head pose roll in degrees")
     det_score: float = Field(default=0.0, description="SCRFD detection confidence score")
+    face_width_px: float = Field(
+        default=0.0, ge=0.0, description="Face box width in pixels of the submitted image"
+    )
+    face_height_px: float = Field(
+        default=0.0, ge=0.0, description="Face box height in pixels of the submitted image"
+    )
+    interocular_px: float | None = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Distance between the two SCRFD eye keypoints in pixels of the submitted image; "
+            "null when the keypoints are unavailable"
+        ),
+    )
     # ArcFace calibration fields
     calibrated_confidence: float | None = Field(
         default=None,
@@ -57,6 +71,8 @@ class IdentifyRequest(BaseModel):
 
 class IdentifyResponse(BaseModel):
     faces: list[FaceDetection]
+    image_width_px: int = Field(default=0, ge=0, description="Decoded input image width")
+    image_height_px: int = Field(default=0, ge=0, description="Decoded input image height")
     annotated_image: str | None = Field(
         default=None, description="Base64-encoded annotated image (if requested)"
     )
@@ -78,6 +94,12 @@ class BatchIdentifyRequest(BaseModel):
 class FrameResult(BaseModel):
     frame_index: int
     faces: list[FaceDetection]
+    image_width_px: int = Field(
+        default=0, ge=0, description="Decoded frame width; 0 if undecodable"
+    )
+    image_height_px: int = Field(
+        default=0, ge=0, description="Decoded frame height; 0 if undecodable"
+    )
 
 
 class PersonMotion(BaseModel):

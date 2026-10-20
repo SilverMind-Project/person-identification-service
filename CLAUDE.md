@@ -7,6 +7,8 @@ Triton-backed face recognition and motion direction detection microservice for t
 ## Read before editing
 
 1. [AGENTS.md](AGENTS.md): canonical reference (architecture, data flow, testing conventions, common tasks, anti-patterns).
+   Load `.claude/skills/engineering-standards/SKILL.md` for every change, and
+   `.claude/skills/face-confidence-calibration/SKILL.md` for similarity, confidence, or calibration work.
 2. `app/main.py` lifespan: source of truth for service initialization and `app.state` keys.
 3. `config/settings.yaml`: every tunable, plus env-var-backed secrets.
 4. `migrations/0001_initial_schema.up.sql`: current database schema (TimescaleDB hypertables, pgvector DiskANN index).
@@ -54,31 +56,39 @@ docker compose up -d
 
 ```text
 app/
-  main.py              # App factory, lifespan (pool, FaceEngine, EnrollmentStore, MotionDetector, GuestImageStore init)
+  main.py              # App factory, lifespan (wiring source of truth)
   config.py            # YAML config loader with ${ENV_VAR:default} interpolation; dot-notation access
+  calibration/         # models.py, evaluator.py (runtime, stdlib+numpy), fit.py + cli.py (offline, calibration-tools extra)
   db/
-    migrate.py         # asyncpg migration runner (scans migrations/*.up.sql, tracks in alembic_version)
+    migrate.py         # asyncpg migration runner (applies migrations/*.up.sql, tracks in alembic_version)
   models/
     enrollment.py      # EnrollRequest, EnrollResult, MemberInfo, MemberListResponse
     identification.py  # FaceDetection, IdentifyRequest/Response, BatchIdentifyRequest/Response, PersonMotion, FrameResult
     motion.py          # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
+    visitor.py         # Visitor cluster envelopes
+  observability/
+    metrics.py         # Prometheus metrics (pid_face_interocular_px, visitor counters)
   routers/
-    health.py          # GET /health (Triton endpoint/profile, model readiness metadata)
+    health.py          # GET /health (incl. calibration status), GET /metrics; no /api/v1 prefix
     enrollment.py      # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
     identification.py  # POST /identify, POST /identify-batch
     motion.py          # POST /detect-motion
+    visitors.py        # Visitor cluster list, detail, name, dismiss, merge
   services/
     face_engine.py     # Triton Buffalo_L preprocessing, inference, and postprocessing
     face_models.py     # DetectedFace and IdentifyResult dataclasses
+    face_geometry.py   # Face box size and interocular distance from SCRFD eye keypoints (pure)
     enrollment_store.py # pgvector gallery: enroll(), identify(), identify_all(), list_members(), remove_member()
+    centroid.py        # Shared embedding insert + centroid recompute
+    visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
     minio_client.py    # boto3 S3 wrapper: upload_bytes(), generate_presigned_url(), delete_object()
     motion_detector.py # Cross-frame centroid tracking + direction classification
     guest_store.py     # Saves unidentified-person frames to MinIO + guest_visits hypertable
-    image_annotator.py # Draws bounding boxes + name/confidence labels on images
+    image_annotator.py # Draws bounding boxes + name/similarity labels on images
 config/
   settings.yaml        # All settings (${ENV_VAR} interpolation)
 migrations/
-  0001_initial_schema.up.sql  # TimescaleDB + pgvector schema
+  0001_initial_schema.up.sql  # Frozen baseline; changes are new 0002+ files with .down.sql
 ```
 
 **Service lifecycle** (in `app.main` lifespan):
@@ -87,10 +97,12 @@ migrations/
 2. Create asyncpg pool from `config.get("database.dsn")` with pgvector codec registered
 3. Run pending migrations via `app.db.migrate.run_migrations(pool)`
 4. Create MinIO client, ensure bucket exists
-5. Open the Triton gRPC client and require all five Buffalo_L models to be ready
+5. Open the Triton gRPC client, build `FaceEngine`, and require all five Buffalo_L models to be ready
 6. Initialize `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
-7. Store all services on `app.state` (face_engine, enrollment_store, motion_detector, guest_store)
-8. On shutdown, close Triton and the asyncpg pool
+7. Initialize `VisitorStore(pool, minio_client)` and start the daily visitor retention task
+8. Load `CalibrationEvaluator` from `calibration.artifact_path` (degraded, never fatal, when missing or incompatible)
+9. Store services on `app.state` (face_engine, triton_client, enrollment_store, motion_detector, guest_store, visitor_store, calibration_evaluator)
+10. On shutdown, cancel the retention task, close Triton, then close the asyncpg pool
 
 **Service injection**: Services are attached to `app.state` in the lifespan. Routers access them via `request.app.state.<service>`.
 
@@ -111,8 +123,16 @@ Runs SCRFD, ArcFace, 2D landmarks, 3D landmarks, and gender/age through Triton.
 Manages face gallery in PostgreSQL with pgvector.
 
 - `enroll(person_id, name, images) -> EnrollResult`: Awaits face inference, selects the largest face per image, inserts embeddings, and recomputes the normalized centroid.
-- `identify(embedding) -> IdentifyResult`: Nearest-centroid query via pgvector `<=>` (cosine distance), `LIMIT 1`. Returns "unknown"/"Guest" if below `recognition.threshold` (default 0.4).
-- `identify_all(faces) -> list[IdentifyResult]`: Batch identify, carries forward bbox.
+- `identify(embedding) -> IdentifyResult`: Nearest-centroid query via pgvector `<=>` (cosine distance), `LIMIT 1`. `recognized` at or above `recognition.threshold` (0.4); `candidate` from `recognition.unknown_threshold` (0.25) up to it (person_id `"unknown"`, `best_candidate_id` set); `unrecognized` below.
+- `identify_all(faces) -> list[IdentifyResult]`: Identifies each face and carries forward bbox, pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, `interocular_px`).
+
+### VisitorStore
+
+Persists unknown-face sightings from every identify call (gated by `visitors.clustering_enabled`), clusters them across visits, surfaces clusters seen on enough distinct days, and names a cluster into an enrolled member only on an explicit operator call. Unnamed clusters are purged by the daily retention task.
+
+### CalibrationEvaluator
+
+Maps raw similarity to `calibrated_confidence` from a versioned JSON artifact. Missing, invalid, or incompatible artifacts give `calibrated_confidence = null` and a degraded `/health` calibration status; it never falls back to raw similarity.
 - `list_members() -> list[MemberInfo]`: LEFT JOIN with embedding count.
 - `remove_member(person_id) -> bool`: DELETE from members (CASCADE handles embeddings + centroids).
 - `member_count() -> int`: Simple COUNT.
@@ -154,8 +174,10 @@ Tables:
 | `embeddings` | Hypertable | id, person_id (FK), embedding vector(512), created_at |
 | `centroids` | Regular | person_id (PK FK), centroid vector(512), updated_at; DiskANN index for ANN search |
 | `guest_visits` | Hypertable | id, guest_count, object_name, frame_index, created_at |
+| `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed) and running centroid |
+| `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
 
-Schema changes: SQL files in `migrations/` applied by `app.db.migrate.run_migrations()`. Uses an `alembic_version` tracking table (Alembic-compatible convention). Each migration runs in its own transaction.
+Schema changes: new numbered SQL files in `migrations/` (`NNNN_name.up.sql` plus a matching `.down.sql`) applied by `app.db.migrate.run_migrations()`. `0001_initial_schema` is frozen; never edit it and never drop the database to apply a change. Uses an `alembic_version` tracking table (Alembic-compatible convention). Each migration runs in its own transaction.
 
 In tests: create a real asyncpg pool connected to a test DB. The `EnrollmentStore` and `GuestImageStore` constructors accept the pool directly.
 
@@ -180,7 +202,9 @@ Key settings:
 | `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Request timeout |
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
 | `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
-| `recognition.unknown_threshold` | -- | `0.25` | Below this = definitely unknown |
+| `recognition.unknown_threshold` | -- | `0.25` | Lower bound of the `candidate` band; below is `unrecognized` |
+| `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON; empty means `degraded_missing` |
+| `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
 | `motion.min_displacement_fraction` | -- | `0.05` | Min displacement for movement |
 | `motion.cross_frame_similarity` | -- | `0.5` | Unknown-face cross-frame linking |
 | `database.dsn` | `DATABASE_URL` | -- | PostgreSQL connection string (required) |
@@ -194,19 +218,25 @@ Key settings:
 
 ## API Endpoints
 
-All under `/api/v1` prefix:
+Health and metrics are at the root; everything else is under `/api/v1`:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | Triton endpoint/profile and enrolled member count |
-| `POST` | `/enroll` | Enroll member with base64 images |
-| `POST` | `/enroll/upload/{person_id}` | Enroll via multipart file upload |
-| `GET` | `/members` | List all enrolled members |
-| `GET` | `/members/{person_id}` | Get member details |
-| `DELETE` | `/members/{person_id}` | Remove member |
-| `POST` | `/identify` | Identify faces in single image |
-| `POST` | `/identify-batch` | Batch identify + optional motion detection |
-| `POST` | `/detect-motion` | Standalone motion direction detection |
+| `GET` | `/health` | Triton endpoint/profile, enrolled member count, calibration status |
+| `GET` | `/metrics` | Prometheus metrics |
+| `POST` | `/api/v1/enroll` | Enroll member with base64 images |
+| `POST` | `/api/v1/enroll/upload/{person_id}` | Enroll via multipart file upload |
+| `GET` | `/api/v1/members` | List all enrolled members |
+| `GET` | `/api/v1/members/{person_id}` | Get member details |
+| `DELETE` | `/api/v1/members/{person_id}` | Remove member |
+| `POST` | `/api/v1/identify` | Identify faces in a single image (writes visitor sightings for unknown faces) |
+| `POST` | `/api/v1/identify-batch` | Batch identify + optional motion detection (same visitor side effect) |
+| `POST` | `/api/v1/detect-motion` | Standalone motion direction detection |
+| `GET` | `/api/v1/visitors/clusters` | Visitor clusters (409 when clustering is disabled) |
+| `GET` | `/api/v1/visitors/clusters/{cluster_id}` | Visitor cluster detail |
+| `POST` | `/api/v1/visitors/clusters/{cluster_id}/name` | Name a cluster into an enrolled member |
+| `POST` | `/api/v1/visitors/clusters/{cluster_id}/dismiss` | Dismiss a cluster |
+| `POST` | `/api/v1/visitors/clusters/{cluster_a}/merge/{cluster_b}` | Merge two clusters |
 
 ---
 

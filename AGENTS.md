@@ -1,6 +1,7 @@
 # AGENTS.md
 
-For ArcFace similarity/confidence contracts or calibration work, load
+Load `/home/sriram/code/nanai/person-identification-service/.claude/skills/engineering-standards/SKILL.md`
+for every change. For ArcFace similarity/confidence contracts or calibration work, also load
 `/home/sriram/code/nanai/person-identification-service/.claude/skills/face-confidence-calibration/SKILL.md`.
 
 Reference for AI coding agents working in `person-identification-service/`. This document is the canonical, deep guide. `CLAUDE.md` is a tight pointer aimed at the same audience; `README.md` is human-facing.
@@ -11,7 +12,9 @@ If a fact appears here, it traces to a file in this tree at the time of writing.
 
 ## 1. Mission and scope
 
-Person Identification Service is a Triton-backed face recognition and motion direction detection microservice for the Cognitive Companion system. It ingests base64-encoded camera frames via a REST API and returns identities, confidence scores, bounding boxes, and motion direction classifications.
+Person Identification Service is a Triton-backed face recognition and motion direction detection microservice for the Cognitive Companion system. It ingests base64-encoded camera frames via a REST API and returns identities, raw similarity and nullable calibrated confidence, face geometry (box size and interocular distance in pixels), bounding boxes, and motion direction classifications. It also owns face confidence calibration (offline fitter plus runtime evaluator) and visitor clustering of recurring unknown faces.
+
+Callers: tracking-orchestrator sends one person crop per `POST /api/v1/identify`; cognitive-companion uses `/identify-batch`, enrollment, and the visitor review endpoints.
 
 Two characteristics make this service non-trivial:
 
@@ -42,41 +45,52 @@ person-identification-service/
 ├── app/
 │   ├── main.py              # App factory + lifespan (service wiring source of truth)
 │   ├── config.py            # YAML config loader with ${ENV_VAR:default} interpolation
+│   ├── calibration/
+│   │   ├── models.py        # CalibrationArtifact / manifest Pydantic models (JSON, never pickle)
+│   │   ├── evaluator.py     # Runtime evaluator (stdlib + numpy only); health states
+│   │   ├── fit.py           # Offline fitter (scikit-learn; calibration-tools extra)
+│   │   └── cli.py           # fit / evaluate / inspect / validate commands
 │   ├── db/
-│   │   └── migrate.py       # asyncpg migration runner
+│   │   └── migrate.py       # asyncpg migration runner (applies migrations/*.up.sql)
 │   ├── models/
 │   │   ├── enrollment.py    # EnrollRequest, EnrollResult, MemberInfo, MemberListResponse
 │   │   ├── identification.py # FaceDetection, IdentifyRequest/Response, BatchIdentifyRequest/Response, PersonMotion, FrameResult
-│   │   └── motion.py        # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
+│   │   ├── motion.py        # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
+│   │   └── visitor.py       # Visitor cluster list/detail/name envelopes
+│   ├── observability/
+│   │   └── metrics.py       # Prometheus metrics (face interocular histogram, visitor counters)
 │   ├── routers/
-│   │   ├── health.py        # GET /health
+│   │   ├── health.py        # GET /health, GET /metrics (no /api/v1 prefix)
 │   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
 │   │   ├── identification.py # POST /identify, POST /identify-batch
-│   │   └── motion.py        # POST /detect-motion
+│   │   ├── motion.py        # POST /detect-motion
+│   │   └── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
 │   └── services/
 │       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
-│       ├── enrollment_store.py # pgvector gallery management: enroll, identify, remove
+│       ├── face_geometry.py   # Face box size and interocular distance (pure)
+│       ├── enrollment_store.py # pgvector gallery: enroll, identify, remove
+│       ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
+│       ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
 │       ├── minio_client.py    # boto3 S3 wrapper for MinIO
 │       ├── motion_detector.py # Cross-frame centroid tracking + direction classification
 │       ├── guest_store.py     # MinIO uploads for unidentified-person frames
 │       └── image_annotator.py # Bounding box + label drawing
 ├── config/
 │   └── settings.yaml        # All application settings
-├── data/
-│   └── models/buffalo_l/    # ONNX model files (committed via Git LFS)
+├── schemas/
+│   └── calibration_artifact.schema.json
 ├── migrations/
-│   └── 0001_initial_schema.up.sql  # TimescaleDB + pgvector tables
-├── tests/
-│   ├── test_enrollment_store.py
-│   ├── test_guest_store.py
-│   └── test_dependencies.py
-├── pyproject.toml           # Build config, deps, tool configs
+│   └── 0001_initial_schema.up.sql  # Frozen baseline; new changes are 0002+ (see section 8)
+├── tests/                   # See section 9
+├── pyproject.toml           # Build config, deps (extras: dev, model-tools, calibration-tools)
 ├── Dockerfile               # Accelerator-independent API build
 ├── docker-compose.yml       # API service definition
 ├── CLAUDE.md                # Agent quick-reference
 └── README.md                # Human-facing documentation
 ```
+
+`app/core/` and `app/utils/` exist as empty directories; there is no code there.
 
 ---
 
@@ -92,6 +106,10 @@ uv sync
 
 # Offline conversion and validation tools
 uv sync --extra model-tools
+
+# Calibration toolchain (offline; never imported by the service)
+uv run --extra calibration-tools python -m app.calibration.cli fit --pairs pairs.json --output artifact.json
+uv run --extra calibration-tools python -m app.calibration.cli validate --artifact artifact.json
 
 # Code quality
 uv run ruff check .              # Lint
@@ -150,14 +168,15 @@ Camera frame (base64)
 In `app.main` lifespan (order matters):
 
 1. `logging.basicConfig()` from config
-2. `_init_pool(dsn)` -- asyncpg pool with `pgvector` vector codec registered (`min_size=1, max_size=5`)
-3. `run_migrations(pool)` -- applies pending `migrations/*.up.sql` files transactionally
-4. `create_minio_client()` -- MinIO client with bucket-ensured
-5. Open `TritonGrpcClient` and require all five configured models to be ready
+2. `_init_pool(dsn)`: asyncpg pool with the `pgvector` codec registered (`min_size=1, max_size=5`)
+3. `run_migrations(pool)`: applies pending `migrations/*.up.sql` files transactionally
+4. `create_minio_client()`: MinIO client with bucket ensured
+5. Open `TritonGrpcClient`, build `FaceEngine`, and require all five configured models to be ready
 6. `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
-7. Store on `app.state`: `face_engine`, `enrollment_store`, `motion_detector`, `guest_store`
-8. Log Triton endpoint/profile and member count
-9. On shutdown: close Triton, then close the database pool
+7. `VisitorStore(pool, minio_client)` plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters)
+8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, and preprocessing versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure
+9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_evaluator`
+10. On shutdown: cancel the retention task, close Triton, then close the database pool
 
 ### 5.4 Configuration
 
@@ -217,9 +236,11 @@ LIMIT 1
 
 Uses pgvector `<=>` (cosine distance). DiskANN index on `centroids.centroid` provides ANN speedup for large galleries.
 
-**Thresholds:**
-- `recognition.threshold` (default 0.4): below this = classify as "unknown"
-- `recognition.unknown_threshold` (default 0.25): below this = "definitely unknown" (currently informational only)
+**Thresholds (raw cosine similarity to the nearest centroid):**
+- `recognition.threshold` (default 0.4): at or above is `recognized` (person_id set)
+- `recognition.unknown_threshold` (default 0.25): from here up to `threshold` is `candidate` (person_id `"unknown"`, `best_candidate_id` set); below is `unrecognized`
+
+**Face geometry:** `identify_all` also fills `face_width_px`, `face_height_px`, and `interocular_px` from `face_geometry()` (`app/services/face_geometry.py`), using the five SCRFD keypoints `FaceEngine` keeps on `DetectedFace.keypoints_5_px`. Interocular distance is the eye-keypoint distance in pixels of the submitted image, or `None` when the keypoints are unusable.
 
 ### 6.3 MotionDetector (`app/services/motion_detector.py`)
 
@@ -290,23 +311,24 @@ The API exposes `/api/v1/visitors/clusters/{id}/name`. Naming is the single priv
 
 ## 7. API surface
 
-All endpoints under `/api/v1` prefix. No authentication (this is a LAN-internal service; the Cognitive Companion backend is the BFF and enforces auth upstream).
+Domain endpoints are under `/api/v1`. Health and metrics are at the root. There is no authentication (LAN-internal service; Cognitive Companion is the BFF and enforces auth upstream).
 
-### Health
+### Health and metrics
 
-| Method | Path | Request | Response |
-| --- | --- | --- | --- |
-| `GET` | `/health` | -- | Triton endpoint/profile, model names, and enrolled count |
+| Method | Path | Response |
+| --- | --- | --- |
+| `GET` | `/health` | `status`, `inference_backend`, `triton_endpoint`, `model_profile`, `enrolled_members`, `model`, `models`, and `calibration` (`status`, `artifact_version`, `arcface_model_version`, `preprocessing_version`) |
+| `GET` | `/metrics` | Prometheus text format |
 
 ### Enrollment
 
 | Method | Path | Request Body | Response |
 | --- | --- | --- | --- |
-| `POST` | `/enroll` | `EnrollRequest` (base64 images) | `EnrollResult` |
-| `POST` | `/enroll/upload/{person_id}` | Multipart: `name` + `files` | `EnrollResult` |
-| `GET` | `/members` | -- | `MemberListResponse` |
-| `GET` | `/members/{person_id}` | -- | `MemberInfo` (404 if missing) |
-| `DELETE` | `/members/{person_id}` | -- | `{"deleted": true, "person_id": str}` (404 if missing) |
+| `POST` | `/api/v1/enroll` | `EnrollRequest` (base64 images) | `EnrollResult` |
+| `POST` | `/api/v1/enroll/upload/{person_id}` | Multipart: `name` + `files` | `EnrollResult` |
+| `GET` | `/api/v1/members` | -- | `MemberListResponse` |
+| `GET` | `/api/v1/members/{person_id}` | -- | `MemberInfo` (404 if missing) |
+| `DELETE` | `/api/v1/members/{person_id}` | -- | `{"deleted": true, "person_id": str}` (404 if missing) |
 
 Enroll error handling:
 - Returns 400 if no valid images provided
@@ -318,8 +340,8 @@ Enroll error handling:
 
 | Method | Path | Request Body | Response |
 | --- | --- | --- | --- |
-| `POST` | `/identify` | `IdentifyRequest` | `IdentifyResponse` |
-| `POST` | `/identify-batch` | `BatchIdentifyRequest` | `BatchIdentifyResponse` |
+| `POST` | `/api/v1/identify` | `IdentifyRequest` | `IdentifyResponse` |
+| `POST` | `/api/v1/identify-batch` | `BatchIdentifyRequest` | `BatchIdentifyResponse` |
 
 `IdentifyRequest` fields:
 - `image`: base64-encoded JPEG/PNG (with or without `data:` URI prefix)
@@ -332,13 +354,27 @@ Enroll error handling:
 - `include_annotated_image`: bool (default false)
 - `save_guest_images`: bool (default false)
 
-Batch endpoint handles per-image errors gracefully: bad frames are skipped and the response carries only successful frames. This is the primary endpoint used by the Cognitive Companion event aggregator.
+Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` and its alias `raw_similarity`, the deprecated `confidence` (mirrors raw similarity; never a probability), nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
+
+**Side effect:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
+
+Batch endpoint handles per-image errors gracefully: bad frames are skipped and the response carries an empty `faces` list for them.
+
+### Visitors
+
+| Method | Path | Response |
+| --- | --- | --- |
+| `GET` | `/api/v1/visitors/clusters` | Cluster list (optional `status` filter); 409 when clustering is disabled |
+| `GET` | `/api/v1/visitors/clusters/{cluster_id}` | Cluster detail with recent sightings |
+| `POST` | `/api/v1/visitors/clusters/{cluster_id}/name` | Names the cluster into an enrolled member (the only privileged transition) |
+| `POST` | `/api/v1/visitors/clusters/{cluster_id}/dismiss` | Dismisses a cluster |
+| `POST` | `/api/v1/visitors/clusters/{cluster_a}/merge/{cluster_b}` | Merges two clusters |
 
 ### Motion
 
 | Method | Path | Request Body | Response |
 | --- | --- | --- | --- |
-| `POST` | `/detect-motion` | `MotionDetectionRequest` (min 2 images) | `MotionDetectionResponse` |
+| `POST` | `/api/v1/detect-motion` | `MotionDetectionRequest` (min 2 images) | `MotionDetectionResponse` |
 
 Standalone motion detection without enrollment lookups. Includes full trajectory data per track.
 
@@ -346,7 +382,9 @@ Standalone motion detection without enrollment lookups. Includes full trajectory
 
 ## 8. Database schema
 
-`migrations/0001_initial_schema.up.sql` creates:
+`migrations/0001_initial_schema.up.sql` is the frozen baseline. It creates the tables below plus the visitor clustering tables `visitor_clusters` and `visitor_sightings` (hypertable on `seen_at`). Migrations are incremental from 2026-10-20: every change is a new `NNNN_description.up.sql` with a matching `.down.sql`; never edit `0001` and never drop the database to apply a change.
+
+Core tables:
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;       -- pgvector
@@ -402,6 +440,8 @@ Key design decisions:
 5. Records the version number on success.
 
 Each migration filename must start with a zero-padded sequence number (e.g., `0001_`).
+The runner has no rollback command and no lock today, so a `.down.sql` is applied by hand when
+needed; rollback tooling is planned (identity-recognition IR-M05, PR 2).
 
 ---
 
@@ -418,6 +458,11 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | `EnrollmentStore` | Real asyncpg pool from `asyncpg.create_pool()`; `_FakeFaceEngine` class returning deterministic embeddings via `np.random.RandomState(42)`; cleanup fixture deletes test data after each test |
 | `GuestImageStore` | Real asyncpg pool; `_FakeMinioClient` (in-memory dict with `upload_bytes`, `generate_presigned_url`); skips if DB unavailable |
 | Dependency compatibility | `importlib.metadata.version()` to check scikit-image version constraint |
+| Pure policy and geometry (`face_geometry`, calibration evaluator and fitter) | Table-driven unit tests with no database (`tests/test_face_geometry.py`, `tests/test_m10_calibration.py`) |
+| Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); the real `EnrollmentStore.identify_all` carry-forward runs, only the centroid lookup is replaced |
+| `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
+
+Test files: `test_confidence_contract_characterization.py`, `test_dependencies.py`, `test_enrollment_store.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
 
 ### Fixtures
 
@@ -458,9 +503,9 @@ async def pool():
 
 ### 10.3 Add a database migration
 
-1. Create a new SQL file in `migrations/` with the next sequence number (e.g., `0002_your_change.up.sql`).
+1. Create a new SQL file in `migrations/` with the next sequence number (e.g., `0002_your_change.up.sql`) and a matching `0002_your_change.down.sql` that exactly reverses it.
 2. Write idempotent DDL (use `IF NOT EXISTS`, `IF EXISTS` where appropriate).
-3. The migration runs automatically at next startup via the lifespan.
+3. The migration runs automatically at next startup via the lifespan. Never edit `0001_initial_schema` and never drop the database to apply a change: enrollment and visitor data are irreplaceable.
 
 ### 10.4 Upgrade the Buffalo_L models
 
@@ -524,6 +569,9 @@ This service does not call other Cognitive Companion microservices. It is called
 | Understand startup wiring | `app/main.py` (lifespan) |
 | Debug face detection | `app/services/face_engine.py` |
 | Debug identification accuracy | `app/services/enrollment_store.py` (thresholds, centroid query) |
+| Measure face resolution | `app/services/face_geometry.py`; per-camera reports come from continuous-tracking `scripts/face_resolution_report.py` |
+| Debug calibration state | `app/calibration/evaluator.py`, `GET /health` (`calibration` block) |
+| Debug visitor clustering | `app/services/visitor_store.py` |
 | Debug motion detection | `app/services/motion_detector.py` (_classify_direction) |
 | Debug guest image uploads | `app/services/guest_store.py` + `app/services/minio_client.py` |
 | Find configuration values | `config/settings.yaml` |

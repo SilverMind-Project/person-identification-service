@@ -20,6 +20,7 @@ from app.models.identification import (
     IdentifyResponse,
     PersonMotion,
 )
+from app.observability.metrics import face_interocular_px
 from app.services.face_engine import decode_base64_image
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
@@ -51,13 +52,28 @@ async def _ingest_unknown_faces(
             logger.exception("Visitor sighting ingest failed; continuing")
 
 
+def _observe_face_geometry(identities: list[IdentifyResult]) -> None:
+    """Record interocular distance per recognition state so operators can see face resolution."""
+    for identity in identities:
+        if identity.interocular_px is not None:
+            face_interocular_px.labels(recognition_state=identity.recognition_state).observe(
+                identity.interocular_px
+            )
+
+
 def _encode_image_to_base64(image) -> str:
     """Encode a BGR numpy array to a base64 JPEG string."""
     _, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
-def _make_face_detection(r, evaluator, active_arcface_version: str, active_model_profile: str, active_preprocessing_version: str) -> FaceDetection:
+def _make_face_detection(
+    r,
+    evaluator,
+    active_arcface_version: str,
+    active_model_profile: str,
+    active_preprocessing_version: str,
+) -> FaceDetection:
     """Build a FaceDetection with calibration fields populated from the evaluator.
 
     calibrated_confidence is set only for recognized faces; degraded states yield None.
@@ -79,6 +95,9 @@ def _make_face_detection(r, evaluator, active_arcface_version: str, active_model
         pitch_deg=r.pitch_deg,
         roll_deg=r.roll_deg,
         det_score=r.det_score,
+        face_width_px=r.face_width_px,
+        face_height_px=r.face_height_px,
+        interocular_px=r.interocular_px,
         calibrated_confidence=calibrated_confidence,
         calibration_status=evaluator.health(),
         calibration_artifact_version=evaluator.artifact_version(),
@@ -108,6 +127,7 @@ async def identify(request: Request, body: IdentifyRequest):
     image = decode_base64_image(body.image)
     faces = await engine.detect_faces(image)
     identities = await store.identify_all(faces)
+    _observe_face_geometry(identities)
 
     await _ingest_unknown_faces(request.app.state.visitor_store, image, faces, identities)
 
@@ -125,10 +145,18 @@ async def identify(request: Request, body: IdentifyRequest):
 
     response = IdentifyResponse(
         faces=[
-            _make_face_detection(r, evaluator, active_arcface_version, active_model_profile, active_preprocessing_version)
+            _make_face_detection(
+                r,
+                evaluator,
+                active_arcface_version,
+                active_model_profile,
+                active_preprocessing_version,
+            )
             for r in identities
         ],
         annotated_image=annotated_b64,
+        image_width_px=int(image.shape[1]),
+        image_height_px=int(image.shape[0]),
     )
     logger.info(
         "POST /identify -> faces=%d persons=[%s] annotated_size=%s",
@@ -184,6 +212,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
         frame_shapes.append((image.shape[0], image.shape[1]))
         faces = await engine.detect_faces(image)
         identities = await store.identify_all(faces)
+        _observe_face_geometry(identities)
         all_faces.append(faces)
         all_identities.append(identities)
 
@@ -200,9 +229,17 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
             FrameResult(
                 frame_index=idx,
                 faces=[
-                    _make_face_detection(r, evaluator, active_arcface_version, active_model_profile, active_preprocessing_version)
+                    _make_face_detection(
+                        r,
+                        evaluator,
+                        active_arcface_version,
+                        active_model_profile,
+                        active_preprocessing_version,
+                    )
                     for r in identities
                 ],
+                image_width_px=int(image.shape[1]),
+                image_height_px=int(image.shape[0]),
             )
         )
 

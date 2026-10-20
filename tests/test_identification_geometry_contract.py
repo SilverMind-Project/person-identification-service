@@ -1,0 +1,120 @@
+"""Wire contract for face geometry on /identify and /identify-batch.
+
+The router, the enrollment store's identify_all carry-forward, and the response models run for
+real; only the database lookup, Triton inference, and visitor persistence are replaced.
+"""
+
+from __future__ import annotations
+
+import base64
+
+import cv2
+import numpy as np
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.calibration.evaluator import CalibrationEvaluator
+from app.models.identification import FaceDetection
+from app.routers import identification
+from app.services.enrollment_store import EnrollmentStore
+from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.motion_detector import MotionDetector
+
+_IMAGE_WIDTH_PX = 96
+_IMAGE_HEIGHT_PX = 128
+# Eyes 30 px apart horizontally and 40 px vertically: 50 px interocular distance.
+_KEYPOINTS = np.array(
+    [[20.0, 40.0], [50.0, 80.0], [35.0, 90.0], [25.0, 100.0], [45.0, 100.0]], dtype=np.float32
+)
+_BBOX = [10.0, 20.0, 70.0, 110.0]
+
+
+class _FakeEngine:
+    model_profile = "full"
+
+    async def detect_faces(self, image: np.ndarray) -> list[DetectedFace]:
+        embedding = np.zeros(512, dtype=np.float32)
+        embedding[0] = 1.0
+        return [
+            DetectedFace(
+                bbox=list(_BBOX), embedding=embedding, det_score=0.9, keypoints_5_px=_KEYPOINTS
+            )
+        ]
+
+
+class _GalleryFreeStore(EnrollmentStore):
+    """Real identify_all carry-forward; the centroid lookup is replaced by a fixed match."""
+
+    def __init__(self) -> None:
+        super().__init__(pool=None, face_engine=_FakeEngine())  # type: ignore[arg-type]
+
+    async def identify(self, embedding: np.ndarray) -> IdentifyResult:
+        return IdentifyResult(
+            person_id="resident-alpha",
+            name="Resident Alpha",
+            confidence=0.62,
+            bbox=[],
+            best_candidate_id="resident-alpha",
+            similarity=0.62,
+            recognition_state="recognized",
+        )
+
+
+class _NoopVisitorStore:
+    async def record_sighting(self, *args: object, **kwargs: object) -> None:
+        return None
+
+
+def _encoded_image() -> str:
+    image = np.full((_IMAGE_HEIGHT_PX, _IMAGE_WIDTH_PX, 3), 127, dtype=np.uint8)
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    return base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+@pytest.fixture
+def client() -> TestClient:
+    app = FastAPI()
+    app.include_router(identification.router)
+    app.state.face_engine = _FakeEngine()
+    app.state.enrollment_store = _GalleryFreeStore()
+    app.state.calibration_evaluator = CalibrationEvaluator(None, "degraded_missing")
+    app.state.visitor_store = _NoopVisitorStore()
+    app.state.motion_detector = MotionDetector()
+    return TestClient(app)
+
+
+def test_face_detection_geometry_defaults() -> None:
+    dumped = FaceDetection(person_id="p", name="n", confidence=0.5, bbox=[0, 0, 1, 1]).model_dump()
+    assert dumped["face_width_px"] == 0.0
+    assert dumped["face_height_px"] == 0.0
+    assert dumped["interocular_px"] is None
+
+
+def test_identify_returns_face_geometry_and_image_size(client: TestClient) -> None:
+    response = client.post("/api/v1/identify", json={"image": _encoded_image()})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["image_width_px"] == _IMAGE_WIDTH_PX
+    assert body["image_height_px"] == _IMAGE_HEIGHT_PX
+    [face] = body["faces"]
+    assert face["face_width_px"] == pytest.approx(60.0)
+    assert face["face_height_px"] == pytest.approx(90.0)
+    assert face["interocular_px"] == pytest.approx(50.0)
+
+
+def test_identify_batch_frames_carry_geometry_and_image_size(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/identify-batch",
+        json={"images": [_encoded_image(), "not-an-image"], "include_motion": False},
+    )
+    assert response.status_code == 200
+    decoded, undecodable = response.json()["frames"]
+    assert (decoded["image_width_px"], decoded["image_height_px"]) == (
+        _IMAGE_WIDTH_PX,
+        _IMAGE_HEIGHT_PX,
+    )
+    assert decoded["faces"][0]["interocular_px"] == pytest.approx(50.0)
+    assert (undecodable["image_width_px"], undecodable["image_height_px"]) == (0, 0)
+    assert undecodable["faces"] == []

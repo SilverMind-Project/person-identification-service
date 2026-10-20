@@ -1,4 +1,4 @@
-"""Prometheus metrics for visitor clustering (identity-continuity M06).
+"""Prometheus metrics for face measurement and visitor clustering.
 
 Registered against the default ``prometheus_client`` registry so the existing
 ``GET /metrics`` route in ``app.routers.health`` exposes them without extra
@@ -7,7 +7,15 @@ plumbing.
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
+
+face_interocular_px = Histogram(
+    "pid_face_interocular_px",
+    "Distance between the two eye keypoints of each identified face, in pixels of the submitted "
+    "image. Recognition degrades sharply below roughly 16 to 24 px.",
+    ["recognition_state"],
+    buckets=(8, 12, 16, 20, 24, 32, 40, 48, 64, 96, 128),
+)
 
 visitor_sightings_recorded_total = Counter(
     "pid_visitor_sightings_recorded_total",

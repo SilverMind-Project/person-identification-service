@@ -227,6 +227,7 @@ class FaceEngine:
             embedding=embedding,
             det_score=float(detection[4]),
             landmarks=landmarks_2d,
+            keypoints_5_px=np.asarray(keypoints, dtype=np.float32),
             yaw_deg=yaw_deg,
             pitch_deg=pitch_deg,
             roll_deg=roll_deg,
