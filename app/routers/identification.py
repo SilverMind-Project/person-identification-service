@@ -86,7 +86,6 @@ def _make_face_detection(
     return FaceDetection(
         person_id=r.person_id,
         name=r.name,
-        confidence=r.confidence,
         bbox=r.bbox,
         recognition_state=r.recognition_state,
         best_candidate_id=r.best_candidate_id,

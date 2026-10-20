@@ -180,7 +180,7 @@ Response:
 ```json
 {
   "faces": [
-    {"person_id": "resident-1", "name": "Resident", "confidence": 0.87, "bbox": [120, 80, 250, 310]}
+    {"person_id": "resident-1", "name": "Resident", "similarity": 0.87, "raw_similarity": 0.87, "recognition_state": "recognized", "bbox": [120, 80, 250, 310]}
   ],
   "annotated_image": null
 }

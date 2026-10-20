@@ -227,7 +227,7 @@ Manages the face gallery in PostgreSQL with pgvector. Replaces the old SQLite + 
 
 **Identify flow:**
 ```sql
-SELECT c.person_id, m.name, 1 - (c.centroid <=> $1) AS confidence
+SELECT c.person_id, m.name, 1 - (c.centroid <=> $1) AS similarity
 FROM centroids c
 JOIN members m ON c.person_id = m.person_id
 ORDER BY c.centroid <=> $1
@@ -354,7 +354,7 @@ Enroll error handling:
 - `include_annotated_image`: bool (default false)
 - `save_guest_images`: bool (default false)
 
-Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` and its alias `raw_similarity`, the deprecated `confidence` (mirrors raw similarity; never a probability), nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
+Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` (the raw cosine match score, never a probability) and its one-release alias `raw_similarity`, nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
 
 **Side effect:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
 

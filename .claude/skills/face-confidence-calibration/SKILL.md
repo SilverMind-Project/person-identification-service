@@ -32,9 +32,11 @@ Identification responses expose both `raw_similarity` and nullable `calibrated_c
 - recognition state;
 - face detection confidence separately.
 
-During compatibility migration, a deprecated `confidence` field may mirror raw similarity only if
-documented and never consumed as calibrated confidence. Add contract tests and remove it in a
-dedicated cleanup milestone.
+The deprecated face `confidence` field (a mirror of raw similarity) was removed on 2026-10-20;
+`tests/test_identification_geometry_contract.py` and
+`tests/test_confidence_contract_characterization.py` assert it stays absent. `similarity` is the
+documented match score; `raw_similarity` remains a computed alias of it for one release (see the
+engineering-standards skill's deprecation note).
 
 Missing, invalid, corrupt, or incompatible calibration produces `calibrated_confidence=null` and a
 degraded health state. It never falls back to raw similarity.

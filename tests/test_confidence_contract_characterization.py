@@ -15,12 +15,13 @@ def test_missing_calibration_exposes_null_calibrated_confidence() -> None:
     detection = FaceDetection(
         person_id="resident-alpha",
         name="Synthetic Resident Alpha",
-        confidence=data["current_baseline"]["confidence"],
         similarity=data["raw_similarity"],
         recognition_state=data["recognition_state"],
         bbox=[10.0, 20.0, 110.0, 220.0],
     ).model_dump()
 
     assert detection["raw_similarity"] == data["raw_similarity"]
+    # The baseline's raw-similarity "confidence" field was removed; similarity carries it.
+    assert "confidence" not in detection
     assert detection["calibrated_confidence"] is None
     assert detection["calibration_status"] == data["target"]["calibration_status"]

@@ -76,7 +76,6 @@ def _unknown_identity() -> IdentifyResult:
     return IdentifyResult(
         person_id="unknown",
         name="Guest",
-        confidence=0.1,
         bbox=[10.0, 20.0, 110.0, 140.0],
         best_candidate_id=None,
         similarity=0.1,

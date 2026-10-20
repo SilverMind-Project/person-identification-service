@@ -68,7 +68,6 @@ def _identity(person_id: str, similarity: float = 0.1) -> IdentifyResult:
     return IdentifyResult(
         person_id=person_id,
         name="Guest" if person_id == "unknown" else "Alice",
-        confidence=similarity,
         bbox=[10.0, 20.0, 110.0, 140.0],
         best_candidate_id=None,
         similarity=similarity,

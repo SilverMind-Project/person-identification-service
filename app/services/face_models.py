@@ -27,7 +27,6 @@ class DetectedFace:
 class IdentifyResult:
     person_id: str
     name: str
-    confidence: float  # cosine similarity to best match
     bbox: list[float]
     best_candidate_id: str | None = None  # nearest centroid person_id, even below threshold
     similarity: float = 0.0  # raw cosine similarity to best candidate (1 - pgvector distance)

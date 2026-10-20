@@ -294,7 +294,6 @@ class TestFaceDetectionSchema:
         fd = FaceDetection(
             person_id="alice",
             name="Alice",
-            confidence=0.85,
             bbox=[10, 20, 100, 120],
         )
         assert fd.recognition_state == "recognized"
@@ -310,7 +309,6 @@ class TestFaceDetectionSchema:
         fd = FaceDetection(
             person_id="unknown",
             name="Guest",
-            confidence=0.33,
             bbox=[50, 40, 150, 180],
             recognition_state="candidate",
             best_candidate_id="alice",
@@ -333,7 +331,6 @@ class TestFaceDetectionSchema:
         fd = FaceDetection(
             person_id="alice",
             name="Alice",
-            confidence=0.88,
             bbox=[10, 20, 100, 120],
             recognition_state="recognized",
             best_candidate_id="alice",
@@ -366,7 +363,6 @@ class TestIdentifyResultCarriesDetectionFields:
         ir = IdentifyResult(
             person_id="alice",
             name="Alice",
-            confidence=0.9,
             bbox=[10, 20, 100, 120],
         )
         assert ir.yaw_deg == 0.0

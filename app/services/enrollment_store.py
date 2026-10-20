@@ -149,7 +149,6 @@ class EnrollmentStore:
                 return IdentifyResult(
                     person_id="unknown",
                     name="Guest",
-                    confidence=0.0,
                     bbox=[],
                     best_candidate_id=None,
                     similarity=0.0,
@@ -164,22 +163,18 @@ class EnrollmentStore:
                 recognition_state = "recognized"
                 person_id = best_id
                 name = best_name
-                confidence = similarity
             elif similarity >= self._unknown_threshold:
                 recognition_state = "candidate"
                 person_id = "unknown"
                 name = "Guest"
-                confidence = similarity
             else:
                 recognition_state = "unrecognized"
                 person_id = "unknown"
                 name = "Guest"
-                confidence = max(0.0, similarity)
 
             return IdentifyResult(
                 person_id=person_id,
                 name=name,
-                confidence=confidence,
                 bbox=[],
                 best_candidate_id=best_id,
                 similarity=similarity,

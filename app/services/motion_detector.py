@@ -95,7 +95,9 @@ class MotionDetector:
                 frame_shapes[entries[0][0]],
             )
 
-            avg_confidence = sum(e[1].confidence for e in entries) / len(entries)
+            # Mean face match score along the track, clamped at 0: a track confidence lies in
+            # [0, 1] while an unrecognized face's cosine similarity can be negative.
+            avg_confidence = sum(max(0.0, e[1].similarity) for e in entries) / len(entries)
             name = entries[0][1].name
 
             results.append(

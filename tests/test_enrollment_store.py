@@ -181,7 +181,7 @@ class TestEnrollmentStore:
 
         assert identity.person_id == "test-8"
         assert identity.name == "Hank"
-        assert identity.confidence > 0.9  # Same embedding should be near-identical
+        assert identity.similarity > 0.9  # Same embedding should be near-identical
 
     async def test_identify_unknown_person(self, store):
         """A face that doesn't match any centroid is classified as unknown."""

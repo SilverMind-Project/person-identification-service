@@ -90,7 +90,6 @@ def _unknown_identity(similarity: float = 0.1, best_candidate_id: str | None = N
     return IdentifyResult(
         person_id="unknown",
         name="Guest",
-        confidence=max(0.0, similarity),
         bbox=[10.0, 20.0, 110.0, 140.0],
         best_candidate_id=best_candidate_id,
         similarity=similarity,

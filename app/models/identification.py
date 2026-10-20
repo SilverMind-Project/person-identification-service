@@ -8,7 +8,6 @@ from pydantic import BaseModel, Field, computed_field
 class FaceDetection(BaseModel):
     person_id: str
     name: str
-    confidence: float = Field(..., ge=0.0, le=1.0)
     bbox: list[float] = Field(..., description="[x1, y1, x2, y2] bounding box")
     recognition_state: str = Field(
         default="recognized",
@@ -17,7 +16,13 @@ class FaceDetection(BaseModel):
     best_candidate_id: str | None = Field(
         default=None, description="Nearest centroid person_id, even when below threshold"
     )
-    similarity: float = Field(default=0.0, description="Raw cosine similarity to best candidate")
+    similarity: float = Field(
+        default=0.0,
+        description=(
+            "Raw ArcFace cosine similarity to the best candidate centroid; the face's match score. "
+            "Not a probability: calibrated_confidence is the probability."
+        ),
+    )
     yaw_deg: float = Field(default=0.0, description="Head pose yaw in degrees")
     pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")
     roll_deg: float = Field(default=0.0, description="Head pose roll in degrees")
@@ -55,7 +60,7 @@ class FaceDetection(BaseModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def raw_similarity(self) -> float:
-        """Normalized-embedding cosine similarity; stable alias for similarity."""
+        """Alias of ``similarity``, kept for one release for older consumers."""
         return self.similarity
 
 

@@ -52,7 +52,8 @@ def annotate_image(
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, _BOX_THICKNESS)
 
         # Label background
-        label = f"{ident.name} {ident.confidence:.0%}"
+        # Raw cosine similarity, not a probability, so it is not rendered as a percentage.
+        label = f"{ident.name} sim {ident.similarity:.2f}"
         (tw, th), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, _TEXT_SCALE, _TEXT_THICKNESS
         )

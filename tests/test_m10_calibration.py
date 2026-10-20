@@ -339,7 +339,6 @@ def test_face_detection_separates_raw_and_calibrated() -> None:
     det = FaceDetection(
         person_id="resident-alpha",
         name="Alice",
-        confidence=0.83,
         bbox=[10.0, 20.0, 110.0, 220.0],
         recognition_state="recognized",
         similarity=0.83,
@@ -365,7 +364,6 @@ def test_face_detection_calibrated_none_when_degraded() -> None:
     det = FaceDetection(
         person_id="unknown",
         name="Unknown",
-        confidence=0.75,
         bbox=[0.0, 0.0, 100.0, 200.0],
         recognition_state="recognized",
         similarity=0.75,
@@ -381,7 +379,6 @@ def test_face_detection_raw_recognition_state_unaffected_by_calibration() -> Non
     base_kwargs = {
         "person_id": "resident-beta",
         "name": "Bob",
-        "confidence": 0.76,
         "bbox": [0.0, 0.0, 50.0, 100.0],
         "recognition_state": "recognized",
         "similarity": 0.76,
@@ -398,7 +395,6 @@ def test_face_detection_candidate_state_has_null_calibrated() -> None:
     det = FaceDetection(
         person_id="person-001",
         name="Alice",
-        confidence=0.30,
         bbox=[0.0, 0.0, 50.0, 100.0],
         recognition_state="candidate",
         similarity=0.30,
@@ -411,7 +407,6 @@ def test_face_detection_unrecognized_state_has_null_calibrated() -> None:
     det = FaceDetection(
         person_id="unknown",
         name="Unknown",
-        confidence=0.10,
         bbox=[0.0, 0.0, 50.0, 100.0],
         recognition_state="unrecognized",
         similarity=0.10,

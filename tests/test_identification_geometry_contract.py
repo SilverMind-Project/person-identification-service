@@ -53,7 +53,6 @@ class _GalleryFreeStore(EnrollmentStore):
         return IdentifyResult(
             person_id="resident-alpha",
             name="Resident Alpha",
-            confidence=0.62,
             bbox=[],
             best_candidate_id="resident-alpha",
             similarity=0.62,
@@ -86,7 +85,7 @@ def client() -> TestClient:
 
 
 def test_face_detection_geometry_defaults() -> None:
-    dumped = FaceDetection(person_id="p", name="n", confidence=0.5, bbox=[0, 0, 1, 1]).model_dump()
+    dumped = FaceDetection(person_id="p", name="n", similarity=0.5, bbox=[0, 0, 1, 1]).model_dump()
     assert dumped["face_width_px"] == 0.0
     assert dumped["face_height_px"] == 0.0
     assert dumped["interocular_px"] is None
@@ -118,3 +117,11 @@ def test_identify_batch_frames_carry_geometry_and_image_size(client: TestClient)
     assert decoded["faces"][0]["interocular_px"] == pytest.approx(50.0)
     assert (undecodable["image_width_px"], undecodable["image_height_px"]) == (0, 0)
     assert undecodable["faces"] == []
+
+
+def test_identify_face_json_has_no_confidence_key(client: TestClient) -> None:
+    # A face carries its match score as similarity (and the raw_similarity alias); the old
+    # "confidence" key, a mislabelled raw similarity, is gone from the wire contract.
+    [face] = client.post("/api/v1/identify", json={"image": _encoded_image()}).json()["faces"]
+    assert "confidence" not in face
+    assert face["raw_similarity"] == face["similarity"] == pytest.approx(0.62)
