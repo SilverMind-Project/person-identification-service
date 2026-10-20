@@ -41,6 +41,28 @@ engineering-standards skill's deprecation note).
 Missing, invalid, corrupt, or incompatible calibration produces `calibrated_confidence=null` and a
 degraded health state. It never falls back to raw similarity.
 
+## Face quality
+
+Every identified face carries `quality {score, resolution, sharpness, detection, pitch, version}`,
+all in [0, 1], or `null` for a face that was not scored.
+
+- Computed only in `app/services/face_quality.py` behind the `FaceQualityScorer` protocol, from
+  `FaceQualityInputs` (interocular distance from `face_geometry()`, SCRFD `det_score`, head
+  pitch, and the grayscale ArcFace-aligned crop), inside `FaceEngine._enrich_face` so alignment
+  runs once. The scorer is built in the lifespan from `face_quality` settings; an unknown
+  `scorer` name or key fails startup before any connection opens.
+- `heuristic-v1`: clamped linear ramps combined by a weighted geometric mean (resolution 0.45,
+  sharpness 0.25, detection 0.15, pitch 0.15; each component floored at 0.01). Yaw is excluded
+  because the tracker applies its own frontality factor. Missing interocular distance scores
+  resolution 0, never high.
+- The version string is the contract. Any change to anchors, weights, components, or the
+  aligned-crop preprocessing is a new version; a calibration artifact or downstream policy
+  conditioned on quality binds to the version it was fitted on and must be re-checked when it
+  changes.
+- Anchors are tuned offline with `scripts/calibrate_face_quality.py` (operator-labeled images,
+  `FaceEngine` directly, read-only centroid query, never writes config) and the pure analysis in
+  `app/calibration/quality_breakpoints.py` (scipy, `calibration-tools` extra only).
+
 ## Calibration dataset
 
 Calibration requires labeled same-person and different-person face pairs. Data rules:

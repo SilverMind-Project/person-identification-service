@@ -5,6 +5,24 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, computed_field
 
 
+class FaceQualityModel(BaseModel):
+    """Face image quality and the components it was combined from, all in [0, 1].
+
+    ``version`` names the scorer; calibration artifacts and downstream policy bind to it.
+    """
+
+    score: float = Field(
+        ..., ge=0.0, le=1.0, description="Combined quality (weighted geometric mean)"
+    )
+    resolution: float = Field(..., ge=0.0, le=1.0, description="Interocular-distance component")
+    sharpness: float = Field(
+        ..., ge=0.0, le=1.0, description="Laplacian-variance component, on the aligned crop"
+    )
+    detection: float = Field(..., ge=0.0, le=1.0, description="SCRFD detection-score component")
+    pitch: float = Field(..., ge=0.0, le=1.0, description="Head-pitch component (yaw is excluded)")
+    version: str = Field(..., description="Scorer version, for example heuristic-v1")
+
+
 class FaceDetection(BaseModel):
     person_id: str
     name: str
@@ -40,6 +58,9 @@ class FaceDetection(BaseModel):
             "Distance between the two SCRFD eye keypoints in pixels of the submitted image; "
             "null when the keypoints are unavailable"
         ),
+    )
+    quality: FaceQualityModel | None = Field(
+        default=None, description="Face image quality; null when the face was not scored"
     )
     # ArcFace calibration fields
     calibrated_confidence: float | None = Field(

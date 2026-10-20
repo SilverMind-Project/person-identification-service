@@ -7,6 +7,7 @@ import numpy.typing as npt
 import pytest
 
 from app.services.face_engine import FaceEngine
+from app.services.face_quality import HeuristicFaceQualityScorer, HeuristicQualityParams
 
 FloatArray = npt.NDArray[np.float32]
 
@@ -84,10 +85,13 @@ def _empty_scrfd_outputs() -> dict[str, FloatArray]:
     }
 
 
+_SCORER = HeuristicFaceQualityScorer(HeuristicQualityParams())
+
+
 @pytest.mark.asyncio
 async def test_detect_faces_runs_complete_buffalo_pack() -> None:
     client = _FakeTritonClient()
-    engine = FaceEngine(client)
+    engine = FaceEngine(client, _SCORER)
 
     faces = await engine.detect_faces(np.zeros((640, 640, 3), dtype=np.uint8))
 
@@ -97,6 +101,11 @@ async def test_detect_faces_runs_complete_buffalo_pack() -> None:
     assert faces[0].landmarks.shape == (106, 2)
     assert faces[0].gender == 1
     assert faces[0].age == 42
+    # Quality is scored once per face from the aligned crop and the face's own geometry.
+    quality = faces[0].quality
+    assert quality is not None
+    assert quality.version == "heuristic-v1"
+    assert 0.0 < quality.score <= 1.0
     assert set(client.calls) == {
         "face-detector-scrfd",
         "face-recognition-arcface",
@@ -109,7 +118,7 @@ async def test_detect_faces_runs_complete_buffalo_pack() -> None:
 @pytest.mark.asyncio
 async def test_detect_faces_accepts_read_only_triton_outputs() -> None:
     client = _FakeTritonClient(read_only_outputs=True)
-    engine = FaceEngine(client)
+    engine = FaceEngine(client, _SCORER)
 
     faces = await engine.detect_faces(np.zeros((640, 640, 3), dtype=np.uint8))
 
@@ -121,7 +130,7 @@ async def test_detect_faces_accepts_read_only_triton_outputs() -> None:
 @pytest.mark.asyncio
 async def test_validate_models_fails_when_any_model_is_unavailable() -> None:
     client = _FakeTritonClient(unavailable_model="face-landmark-3d68")
-    engine = FaceEngine(client)
+    engine = FaceEngine(client, _SCORER)
 
     with pytest.raises(RuntimeError, match="face-landmark-3d68"):
         await engine.validate_models()
@@ -138,4 +147,4 @@ def test_invalid_model_profile_fails_at_construction(
     monkeypatch.setattr("app.services.face_engine.config.get", _config_get)
 
     with pytest.raises(ValueError, match="model_profile"):
-        FaceEngine(_FakeTritonClient())
+        FaceEngine(_FakeTritonClient(), _SCORER)

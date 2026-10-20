@@ -84,6 +84,38 @@ calibration:
   arcface_model_version: "${CALIBRATION_ARCFACE_MODEL_VERSION:buffalo_l}"
   preprocessing_version: "${CALIBRATION_PREPROCESSING_VERSION:v1}"
 
+# Face image quality, reported on every identified face as quality {score, components, version}.
+# scorer: the only implementation is "heuristic-v1"; any other value fails startup. Downstream
+#   calibration and policy bind to the version string, so changing a value below means bumping
+#   the scorer version, not silently editing it.
+# heuristic: clamped linear ramps (low anchor -> 0, high anchor -> 1) combined by a weighted
+#   geometric mean. Provisional until scripts/calibrate_face_quality.py is run on labeled captures.
+#   iod_*_px: interocular distance in pixels; recognition collapses near 10 px and ArcFace's
+#     112 px template has the eyes about 35 px apart, so gains saturate above 36 px.
+#   det_*: SCRFD detection score; the detector threshold is 0.6 and above 0.9 faces are clean.
+#   log_lap_var_*: log10 of the Laplacian variance of the aligned grayscale crop (1.301 = 20,
+#     2.477 = 300), the standard focus measure.
+#   pitch_*_deg: absolute head pitch, descending ramp (15 deg or less scores 1, 45 or more 0).
+#     Yaw is excluded because tracking-orchestrator already applies a yaw frontality factor.
+#   weight_*: geometric-mean exponents, must sum to 1; resolution dominates because face size is
+#     the main recognition failure on household cameras.
+face_quality:
+  scorer: heuristic-v1
+  heuristic:
+    iod_low_px: 10.0
+    iod_high_px: 36.0
+    det_low: 0.5
+    det_high: 0.9
+    log_lap_var_low: 1.30103
+    log_lap_var_high: 2.47712
+    pitch_low_deg: 45.0
+    pitch_high_deg: 15.0
+    weight_resolution: 0.45
+    weight_sharpness: 0.25
+    weight_detection: 0.15
+    weight_pitch: 0.15
+    component_floor: 0.01
+
 # Visitor clustering (identity-continuity M06)
 # Persists unmatched face embeddings, clusters them across visits, and lets a
 # caregiver name a recurring visitor (nurse, handyman) into a household member.

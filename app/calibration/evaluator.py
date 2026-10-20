@@ -60,9 +60,7 @@ class CalibrationEvaluator:
     ) -> CalibrationEvaluator:
         """Load a calibration artifact from disk, returning a degraded evaluator on any failure."""
         if not artifact_path:
-            logger.warning(
-                "calibration_artifact_missing reason=no_path_configured"
-            )
+            logger.warning("calibration_artifact_missing reason=no_path_configured")
             return cls(None, "degraded_missing", "no artifact_path configured")
 
         p = Path(artifact_path)
@@ -95,8 +93,7 @@ class CalibrationEvaluator:
 
         if expected_model_profile and artifact.model_profile != expected_model_profile:
             logger.warning(
-                "calibration_artifact_incompatible field=model_profile "
-                "artifact=%s expected=%s",
+                "calibration_artifact_incompatible field=model_profile artifact=%s expected=%s",
                 artifact.model_profile,
                 expected_model_profile,
             )

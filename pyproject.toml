@@ -30,6 +30,8 @@ model-tools = [
 calibration-tools = [
     "scikit-learn>=1.5,<1.7",
     "matplotlib>=3.8",
+    # Spearman rank correlation for scripts/calibrate_face_quality.py.
+    "scipy>=1.11",
 ]
 dev = [
     "ruff>=0.8",
@@ -101,6 +103,7 @@ module = [
     "numpy.*",
     "yaml.*",
     "sklearn.*",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 

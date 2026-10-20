@@ -11,7 +11,6 @@ import numpy as np
 from app import config
 from app.models.enrollment import EnrollResult, MemberInfo
 from app.services.centroid import insert_embeddings, recompute_member_centroid
-from app.services.face_geometry import face_geometry
 from app.services.face_models import DetectedFace, IdentifyResult
 
 logger = logging.getLogger(__name__)
@@ -197,10 +196,10 @@ class EnrollmentStore:
             result.pitch_deg = face.pitch_deg
             result.roll_deg = face.roll_deg
             result.det_score = face.det_score
-            geometry = face_geometry(face.bbox, face.keypoints_5_px)
-            result.face_width_px = geometry.face_width_px
-            result.face_height_px = geometry.face_height_px
-            result.interocular_px = geometry.interocular_px
+            result.face_width_px = face.geometry.face_width_px
+            result.face_height_px = face.geometry.face_height_px
+            result.interocular_px = face.geometry.interocular_px
+            result.quality = face.quality
             results.append(result)
         return results
 

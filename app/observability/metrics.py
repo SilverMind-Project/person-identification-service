@@ -17,6 +17,14 @@ face_interocular_px = Histogram(
     buckets=(8, 12, 16, 20, 24, 32, 40, 48, 64, 96, 128),
 )
 
+face_quality_score = Histogram(
+    "pid_face_quality_score",
+    "Face image quality score in [0, 1] of each identified face (heuristic scorer: resolution, "
+    "sharpness, detection, pitch).",
+    ["recognition_state"],
+    buckets=(0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
 visitor_sightings_recorded_total = Counter(
     "pid_visitor_sightings_recorded_total",
     "Unmatched face sightings persisted into the visitor cluster store.",

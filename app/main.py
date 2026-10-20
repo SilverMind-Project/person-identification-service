@@ -19,6 +19,7 @@ from app.db.migrate import run_migrations
 from app.routers import enrollment, health, identification, motion, visitors
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_engine import FaceEngine
+from app.services.face_quality import build_face_quality_scorer
 from app.services.guest_store import GuestImageStore
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
@@ -60,6 +61,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger = logging.getLogger(__name__)
     logger.info("Starting Person Identification Service")
 
+    # Configuration errors fail before any connection is opened.
+    quality_scorer = build_face_quality_scorer(config.get("face_quality", {}))
+
     # Database pool
     dsn = config.get("database.dsn")
     if not dsn:
@@ -85,7 +89,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         triton_timeout_ms = int(config.get("face_engine.triton_timeout_ms", 30_000))
         triton_client = TritonGrpcClient(triton_url, timeout_ms=triton_timeout_ms)
         await triton_client.__aenter__()
-        face_engine = FaceEngine(triton_client)
+        face_engine = FaceEngine(triton_client, quality_scorer)
         await face_engine.validate_models()
         app.state.face_engine = face_engine
         app.state.triton_client = triton_client
@@ -103,13 +107,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         calibration_evaluator = CalibrationEvaluator.from_artifact_path(
             config.get("calibration.artifact_path", "") or None,
-            expected_arcface_model_version=str(
-                config.get("calibration.arcface_model_version", "")
-            ),
+            expected_arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
             expected_model_profile=str(face_engine.model_profile),
-            expected_preprocessing_version=str(
-                config.get("calibration.preprocessing_version", "")
-            ),
+            expected_preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
         )
         app.state.calibration_evaluator = calibration_evaluator
         logger.info(

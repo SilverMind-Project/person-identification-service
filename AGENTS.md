@@ -49,6 +49,7 @@ person-identification-service/
 │   │   ├── models.py        # CalibrationArtifact / manifest Pydantic models (JSON, never pickle)
 │   │   ├── evaluator.py     # Runtime evaluator (stdlib + numpy only); health states
 │   │   ├── fit.py           # Offline fitter (scikit-learn; calibration-tools extra)
+│   │   ├── quality_breakpoints.py # Offline face quality anchor analysis (scipy; calibration-tools)
 │   │   └── cli.py           # fit / evaluate / inspect / validate commands
 │   ├── db/
 │   │   └── migrate.py       # asyncpg migration runner (applies migrations/*.up.sql)
@@ -58,7 +59,7 @@ person-identification-service/
 │   │   ├── motion.py        # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
 │   │   └── visitor.py       # Visitor cluster list/detail/name envelopes
 │   ├── observability/
-│   │   └── metrics.py       # Prometheus metrics (face interocular histogram, visitor counters)
+│   │   └── metrics.py       # Prometheus metrics (interocular and quality histograms, visitor counters)
 │   ├── routers/
 │   │   ├── health.py        # GET /health, GET /metrics (no /api/v1 prefix)
 │   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
@@ -69,6 +70,7 @@ person-identification-service/
 │       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
 │       ├── face_geometry.py   # Face box size and interocular distance (pure)
+│       ├── face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
 │       ├── enrollment_store.py # pgvector gallery: enroll, identify, remove
 │       ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
 │       ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
@@ -240,7 +242,9 @@ Uses pgvector `<=>` (cosine distance). DiskANN index on `centroids.centroid` pro
 - `recognition.threshold` (default 0.4): at or above is `recognized` (person_id set)
 - `recognition.unknown_threshold` (default 0.25): from here up to `threshold` is `candidate` (person_id `"unknown"`, `best_candidate_id` set); below is `unrecognized`
 
-**Face geometry:** `identify_all` also fills `face_width_px`, `face_height_px`, and `interocular_px` from `face_geometry()` (`app/services/face_geometry.py`), using the five SCRFD keypoints `FaceEngine` keeps on `DetectedFace.keypoints_5_px`. Interocular distance is the eye-keypoint distance in pixels of the submitted image, or `None` when the keypoints are unusable.
+**Face geometry:** `identify_all` also fills `face_width_px`, `face_height_px`, and `interocular_px` from `DetectedFace.geometry`, which `DetectedFace.__post_init__` derives once with `face_geometry()` (`app/services/face_geometry.py`) from the five SCRFD keypoints on `DetectedFace.keypoints_5_px`.
+
+**Face quality:** `FaceEngine._enrich_face` scores each face with the injected `FaceQualityScorer` (`app/services/face_quality.py`, `heuristic-v1`) from interocular distance, `det_score`, pitch, and the grayscale aligned crop; `identify_all` copies `DetectedFace.quality` and the routers serialize it as `FaceDetection.quality`. Interocular distance is the eye-keypoint distance in pixels of the submitted image, or `None` when the keypoints are unusable.
 
 ### 6.3 MotionDetector (`app/services/motion_detector.py`)
 
@@ -458,11 +462,11 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | `EnrollmentStore` | Real asyncpg pool from `asyncpg.create_pool()`; `_FakeFaceEngine` class returning deterministic embeddings via `np.random.RandomState(42)`; cleanup fixture deletes test data after each test |
 | `GuestImageStore` | Real asyncpg pool; `_FakeMinioClient` (in-memory dict with `upload_bytes`, `generate_presigned_url`); skips if DB unavailable |
 | Dependency compatibility | `importlib.metadata.version()` to check scikit-image version constraint |
-| Pure policy and geometry (`face_geometry`, calibration evaluator and fitter) | Table-driven unit tests with no database (`tests/test_face_geometry.py`, `tests/test_m10_calibration.py`) |
+| Pure policy and geometry (`face_geometry`, `face_quality`, calibration evaluator and fitter) | Table-driven unit tests with no database (`tests/test_face_geometry.py`, `tests/test_face_quality.py`, `tests/test_m10_calibration.py`) |
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); the real `EnrollmentStore.identify_all` carry-forward runs, only the centroid lookup is replaced |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_dependencies.py`, `test_enrollment_store.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
+Test files: `test_confidence_contract_characterization.py`, `test_dependencies.py`, `test_enrollment_store.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
 
 ### Fixtures
 

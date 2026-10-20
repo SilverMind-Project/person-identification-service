@@ -86,7 +86,9 @@ def _face(embedding: np.ndarray, det_score: float = 0.95, bbox=None) -> Detected
     )
 
 
-def _unknown_identity(similarity: float = 0.1, best_candidate_id: str | None = None) -> IdentifyResult:
+def _unknown_identity(
+    similarity: float = 0.1, best_candidate_id: str | None = None
+) -> IdentifyResult:
     return IdentifyResult(
         person_id="unknown",
         name="Guest",
@@ -300,7 +302,7 @@ class TestDismissAndRetention:
             )
             assert joined == cluster_id
 
-        #...but the cluster never re-promotes to surfaced despite 3 distinct days.
+        # ...but the cluster never re-promotes to surfaced despite 3 distinct days.
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT status, distinct_days FROM visitor_clusters WHERE cluster_id = $1",

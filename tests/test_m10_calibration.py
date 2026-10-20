@@ -47,14 +47,25 @@ def _artifact_dict(**overrides: Any) -> dict[str, Any]:
         "x_knots": None,
         "y_knots": None,
         "split_counts": {
-            "fit_pairs": 400, "fit_positives": 200, "fit_negatives": 200,
-            "val_pairs": 100, "val_positives": 50, "val_negatives": 50,
-            "test_pairs": 100, "test_positives": 50, "test_negatives": 50,
-            "fit_identities": 20, "val_identities": 5, "test_identities": 5,
+            "fit_pairs": 400,
+            "fit_positives": 200,
+            "fit_negatives": 200,
+            "val_pairs": 100,
+            "val_positives": 50,
+            "val_negatives": 50,
+            "test_pairs": 100,
+            "test_positives": 50,
+            "test_negatives": 50,
+            "fit_identities": 20,
+            "val_identities": 5,
+            "test_identities": 5,
         },
         "metrics": {
-            "brier_score": 0.05, "log_loss": 0.15, "ece": 0.02,
-            "fmr_at_operating_point": 0.01, "fnmr_at_operating_point": 0.08,
+            "brier_score": 0.05,
+            "log_loss": 0.15,
+            "ece": 0.02,
+            "fmr_at_operating_point": 0.01,
+            "fnmr_at_operating_point": 0.08,
             "operating_point_threshold": 0.80,
         },
     }
@@ -383,7 +394,9 @@ def test_face_detection_raw_recognition_state_unaffected_by_calibration() -> Non
         "recognition_state": "recognized",
         "similarity": 0.76,
     }
-    with_cal = FaceDetection(**base_kwargs, calibrated_confidence=0.9, calibration_status="ready").model_dump()
+    with_cal = FaceDetection(
+        **base_kwargs, calibrated_confidence=0.9, calibration_status="ready"
+    ).model_dump()
     without_cal = FaceDetection(**base_kwargs).model_dump()
 
     assert with_cal["recognition_state"] == "recognized"
@@ -421,12 +434,14 @@ def test_face_detection_unrecognized_state_has_null_calibrated() -> None:
 
 def test_evaluator_imports_without_sklearn() -> None:
     """CalibrationEvaluator must not require scikit-learn at import or predict time."""
-    with patch.dict(sys.modules, {"sklearn": None, "sklearn.linear_model": None,
-                                   "sklearn.isotonic": None}):
+    with patch.dict(
+        sys.modules, {"sklearn": None, "sklearn.linear_model": None, "sklearn.isotonic": None}
+    ):
         # Re-import to verify it loads cleanly with sklearn blocked
         import importlib
 
         import app.calibration.evaluator as ev_mod
+
         importlib.reload(ev_mod)
 
         ev = ev_mod.CalibrationEvaluator.from_artifact_path(None)
@@ -459,9 +474,7 @@ def test_fit_isotonic_produces_monotone_knots() -> None:
     from app.calibration.fit import fit_isotonic
 
     # positives cluster high, negatives cluster low
-    pairs = [(0.3 + 0.01 * i, 0) for i in range(50)] + [
-        (0.7 + 0.01 * i, 1) for i in range(50)
-    ]
+    pairs = [(0.3 + 0.01 * i, 0) for i in range(50)] + [(0.7 + 0.01 * i, 1) for i in range(50)]
     x_knots, y_knots = fit_isotonic(pairs)
     assert len(x_knots) == len(y_knots)
     for i in range(1, len(x_knots)):
@@ -531,10 +544,7 @@ def test_failed_gate_produces_no_artifact(tmp_path: Path) -> None:
     from app.calibration.fit import run_fit
 
     rng = random.Random(42)
-    pairs = [
-        (rng.uniform(0, 1), rng.randint(0, 1), f"id-{i % 20}")
-        for i in range(600)
-    ]
+    pairs = [(rng.uniform(0, 1), rng.randint(0, 1), f"id-{i % 20}") for i in range(600)]
 
     output = tmp_path / "artifact.json"
     # Use impossibly strict gates to force failure
@@ -571,12 +581,18 @@ def test_check_gates_all_pass() -> None:
     from app.calibration.fit import check_gates
 
     metrics = CalibrationMetrics(
-        brier_score=0.05, log_loss=0.20, ece=0.03,
-        fmr_at_operating_point=0.02, fnmr_at_operating_point=0.10,
+        brier_score=0.05,
+        log_loss=0.20,
+        ece=0.03,
+        fmr_at_operating_point=0.02,
+        fnmr_at_operating_point=0.10,
         operating_point_threshold=0.80,
     )
     counts = SplitCounts(
-        fit_pairs=400, val_pairs=100, test_pairs=100, fit_identities=10,
+        fit_pairs=400,
+        val_pairs=100,
+        test_pairs=100,
+        fit_identities=10,
     )
     failures = check_gates(metrics, counts)
     assert failures == []
@@ -587,7 +603,10 @@ def test_check_gates_brier_fails() -> None:
 
     metrics = CalibrationMetrics(brier_score=0.20)
     counts = SplitCounts(
-        fit_pairs=400, val_pairs=100, test_pairs=100, fit_identities=10,
+        fit_pairs=400,
+        val_pairs=100,
+        test_pairs=100,
+        fit_identities=10,
     )
     failures = check_gates(metrics, counts)
     assert any("brier_score" in f for f in failures)
@@ -597,11 +616,16 @@ def test_check_gates_insufficient_fit_pairs_fails() -> None:
     from app.calibration.fit import check_gates
 
     metrics = CalibrationMetrics(
-        brier_score=0.05, log_loss=0.15, ece=0.02, fmr_at_operating_point=0.01,
+        brier_score=0.05,
+        log_loss=0.15,
+        ece=0.02,
+        fmr_at_operating_point=0.01,
     )
     counts = SplitCounts(
         fit_pairs=10,  # below min_fit_pairs=200
-        val_pairs=100, test_pairs=100, fit_identities=10,
+        val_pairs=100,
+        test_pairs=100,
+        fit_identities=10,
     )
     failures = check_gates(metrics, counts)
     assert any("fit_pairs" in f for f in failures)

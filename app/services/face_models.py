@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
+
+from app.services.face_geometry import FaceGeometry, face_geometry
+from app.services.face_quality import FaceQuality
 
 
 @dataclass
@@ -21,6 +24,14 @@ class DetectedFace:
     roll_deg: float = 0.0  # head pose roll (tilt), degrees
     gender: int | None = None  # InsightFace convention: 0=female, 1=male
     age: int | None = None
+    # Set by FaceEngine from the aligned crop; None for a face that was not scored.
+    quality: FaceQuality | None = None
+    # Derived from bbox and keypoints_5_px when the face is built, so every producer (the engine
+    # and test fakes alike) carries the one measurement face_geometry() defines.
+    geometry: FaceGeometry = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.geometry = face_geometry(self.bbox, self.keypoints_5_px)
 
 
 @dataclass
@@ -38,3 +49,4 @@ class IdentifyResult:
     face_width_px: float = 0.0  # face box width in input-image pixels
     face_height_px: float = 0.0  # face box height in input-image pixels
     interocular_px: float | None = None  # eye-keypoint distance in input-image pixels
+    quality: FaceQuality | None = None  # face image quality, carried from DetectedFace

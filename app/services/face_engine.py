@@ -14,6 +14,7 @@ from triton_shared.client import TritonClientProtocol
 
 from app import config
 from app.services.face_models import DetectedFace
+from app.services.face_quality import FaceQualityInputs, FaceQualityScorer
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +98,9 @@ _CANONICAL_MAP_INDICES = (
 class FaceEngine:
     """Runs the five Buffalo_L graphs through Triton."""
 
-    def __init__(self, client: TritonClientProtocol) -> None:
+    def __init__(self, client: TritonClientProtocol, quality_scorer: FaceQualityScorer) -> None:
         self._client = client
+        self._quality_scorer = quality_scorer
         self._det_threshold = float(config.get("face_engine.det_threshold", 0.6))
         det_size = config.get("face_engine.det_size", [640, 640])
         if det_size != [640, 640]:
@@ -181,7 +183,7 @@ class FaceEngine:
         keypoints: np.ndarray,
     ) -> DetectedFace:
         bbox = detection[:4]
-        arcface_input = _prepare_arcface(image, keypoints)
+        arcface_input, aligned_bgr = _prepare_arcface(image, keypoints)
         landmark_input, landmark_matrix = _prepare_bbox_crop(image, bbox, 192)
         genderage_input, _ = _prepare_bbox_crop(image, bbox, 96)
 
@@ -222,7 +224,7 @@ class FaceEngine:
         gender = int(np.argmax(attributes[:2])) if attributes.size >= 2 else None
         age = int(np.rint(attributes[2] * 100.0)) if attributes.size >= 3 else None
 
-        return DetectedFace(
+        face = DetectedFace(
             bbox=[float(value) for value in bbox],
             embedding=embedding,
             det_score=float(detection[4]),
@@ -234,6 +236,19 @@ class FaceEngine:
             gender=gender,
             age=age,
         )
+        # Quality is measured on the same aligned crop ArcFace embedded, so sharpness is
+        # comparable across face sizes and alignment runs once per face.
+        face.quality = self._quality_scorer.score(
+            FaceQualityInputs(
+                interocular_px=face.geometry.interocular_px,
+                det_score=face.det_score,
+                pitch_deg=face.pitch_deg,
+                aligned_gray_112=np.asarray(
+                    cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2GRAY), dtype=np.uint8
+                ),
+            )
+        )
+        return face
 
     @staticmethod
     def compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
@@ -340,12 +355,18 @@ def _nms(detections: np.ndarray, threshold: float) -> list[int]:
     return keep
 
 
-def _prepare_arcface(image: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
+def align_face(image: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
+    """Warp a face onto the 112x112 ArcFace template from its five SCRFD keypoints (BGR out)."""
     matrix = _similarity_transform(keypoints.astype(np.float32), _ARCFACE_DST)
-    aligned = cv2.warpAffine(image, matrix, (112, 112), borderValue=0.0)
+    return cv2.warpAffine(image, matrix, (112, 112), borderValue=0.0)
+
+
+def _prepare_arcface(image: np.ndarray, keypoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Align a face onto the ArcFace template; return the model tensor and the aligned BGR crop."""
+    aligned = align_face(image, keypoints)
     rgb = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
     tensor = ((rgb.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None]
-    return np.ascontiguousarray(tensor)
+    return np.ascontiguousarray(tensor), aligned
 
 
 def _prepare_bbox_crop(

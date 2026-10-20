@@ -58,7 +58,7 @@ docker compose up -d
 app/
   main.py              # App factory, lifespan (wiring source of truth)
   config.py            # YAML config loader with ${ENV_VAR:default} interpolation; dot-notation access
-  calibration/         # models.py, evaluator.py (runtime, stdlib+numpy), fit.py + cli.py (offline, calibration-tools extra)
+  calibration/         # models.py, evaluator.py (runtime, stdlib+numpy), fit.py + cli.py + quality_breakpoints.py (offline, calibration-tools extra)
   db/
     migrate.py         # asyncpg migration runner (applies migrations/*.up.sql, tracks in alembic_version)
   models/
@@ -67,7 +67,7 @@ app/
     motion.py          # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
     visitor.py         # Visitor cluster envelopes
   observability/
-    metrics.py         # Prometheus metrics (pid_face_interocular_px, visitor counters)
+    metrics.py         # Prometheus metrics (pid_face_interocular_px, pid_face_quality_score, visitor counters)
   routers/
     health.py          # GET /health (incl. calibration status), GET /metrics; no /api/v1 prefix
     enrollment.py      # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
@@ -78,6 +78,7 @@ app/
     face_engine.py     # Triton Buffalo_L preprocessing, inference, and postprocessing
     face_models.py     # DetectedFace and IdentifyResult dataclasses
     face_geometry.py   # Face box size and interocular distance from SCRFD eye keypoints (pure)
+    face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
     enrollment_store.py # pgvector gallery: enroll(), identify(), identify_all(), list_members(), remove_member()
     centroid.py        # Shared embedding insert + centroid recompute
     visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
@@ -89,15 +90,17 @@ config/
   settings.yaml        # All settings (${ENV_VAR} interpolation)
 migrations/
   0001_initial_schema.up.sql  # Frozen baseline; changes are new 0002+ files with .down.sql
+scripts/
+  calibrate_face_quality.py   # Offline: suggest face quality ramp anchors from labeled images
 ```
 
 **Service lifecycle** (in `app.main` lifespan):
 
-1. Configure logging from `config.get("logging.level")`
+1. Configure logging from `config.get("logging.level")`; build the face quality scorer from `face_quality` (an unknown scorer fails startup here, before any connection)
 2. Create asyncpg pool from `config.get("database.dsn")` with pgvector codec registered
 3. Run pending migrations via `app.db.migrate.run_migrations(pool)`
 4. Create MinIO client, ensure bucket exists
-5. Open the Triton gRPC client, build `FaceEngine`, and require all five Buffalo_L models to be ready
+5. Open the Triton gRPC client, build `FaceEngine` with the quality scorer, and require all five Buffalo_L models to be ready
 6. Initialize `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
 7. Initialize `VisitorStore(pool, minio_client)` and start the daily visitor retention task
 8. Load `CalibrationEvaluator` from `calibration.artifact_path` (degraded, never fatal, when missing or incompatible)
@@ -114,7 +117,8 @@ migrations/
 
 Runs SCRFD, ArcFace, 2D landmarks, 3D landmarks, and gender/age through Triton.
 
-- `await detect_faces(image) -> list[DetectedFace]`: complete Buffalo_L inference.
+- `await detect_faces(image) -> list[DetectedFace]`: complete Buffalo_L inference, plus face quality scored on the ArcFace-aligned crop (alignment runs once per face).
+- `align_face(image, keypoints)`: module function returning the 112x112 aligned BGR crop (used by the offline quality script).
 - `compute_similarity(emb1, emb2) -> float`: static method, cosine similarity via `np.dot`.
 - Startup fails if any configured model is unavailable. No local fallback exists.
 
@@ -124,7 +128,7 @@ Manages face gallery in PostgreSQL with pgvector.
 
 - `enroll(person_id, name, images) -> EnrollResult`: Awaits face inference, selects the largest face per image, inserts embeddings, and recomputes the normalized centroid.
 - `identify(embedding) -> IdentifyResult`: Nearest-centroid query via pgvector `<=>` (cosine distance), `LIMIT 1`. `recognized` at or above `recognition.threshold` (0.4); `candidate` from `recognition.unknown_threshold` (0.25) up to it (person_id `"unknown"`, `best_candidate_id` set); `unrecognized` below.
-- `identify_all(faces) -> list[IdentifyResult]`: Identifies each face and carries forward bbox, pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, `interocular_px`).
+- `identify_all(faces) -> list[IdentifyResult]`: Identifies each face and carries forward bbox, pose, `det_score`, face geometry (`face_width_px`, `face_height_px`, `interocular_px`, from `DetectedFace.geometry`), and `quality`.
 
 ### VisitorStore
 
@@ -204,6 +208,8 @@ Key settings:
 | `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
 | `recognition.unknown_threshold` | -- | `0.25` | Lower bound of the `candidate` band; below is `unrecognized` |
 | `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON; empty means `degraded_missing` |
+| `face_quality.scorer` | -- | `heuristic-v1` | Face quality scorer; unknown names fail startup |
+| `face_quality.heuristic.*` | -- | see settings | Ramp anchors and geometric-mean weights; a change is a new scorer version |
 | `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
 | `motion.min_displacement_fraction` | -- | `0.05` | Min displacement for movement |
 | `motion.cross_frame_similarity` | -- | `0.5` | Unknown-face cross-frame linking |

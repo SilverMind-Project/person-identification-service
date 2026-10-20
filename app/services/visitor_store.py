@@ -282,9 +282,7 @@ class VisitorStore:
                     status,
                 )
             else:
-                rows = await conn.fetch(
-                    "SELECT * FROM visitor_clusters ORDER BY last_seen_at DESC"
-                )
+                rows = await conn.fetch("SELECT * FROM visitor_clusters ORDER BY last_seen_at DESC")
 
             summaries = []
             for row in rows:
@@ -320,7 +318,9 @@ class VisitorStore:
         return VisitorClusterDetail(
             **summary.model_dump(),
             recent_sightings=[
-                VisitorSighting(seen_at=r["seen_at"], quality=r["quality"], crop_object=r["crop_object"])
+                VisitorSighting(
+                    seen_at=r["seen_at"], quality=r["quality"], crop_object=r["crop_object"]
+                )
                 for r in sighting_rows
             ],
         )
@@ -339,9 +339,7 @@ class VisitorStore:
             recent_crop_keys=recent_crop_keys,
         )
 
-    async def name_cluster(
-        self, cluster_id: str, person_id: str, name: str
-    ) -> NameClusterResponse:
+    async def name_cluster(self, cluster_id: str, person_id: str, name: str) -> NameClusterResponse:
         """Name a cluster into a household member. Raises ValueError on conflict,
         LookupError if the cluster does not exist."""
         async with self._pool.acquire() as conn, conn.transaction():
@@ -372,9 +370,7 @@ class VisitorStore:
                     embedding_count=embedding_count or 0,
                 )
 
-            existing = await conn.fetchrow(
-                "SELECT 1 FROM members WHERE person_id = $1", person_id
-            )
+            existing = await conn.fetchrow("SELECT 1 FROM members WHERE person_id = $1", person_id)
             if existing is not None:
                 raise ValueError(f"person_id '{person_id}' already exists")
 
@@ -455,9 +451,13 @@ class VisitorStore:
                 raise ValueError("cannot merge a named cluster")
 
             row_a, row_b = by_id[cluster_a], by_id[cluster_b]
-            keep, other = (row_a, row_b) if row_a["created_at"] <= row_b["created_at"] else (
-                row_b,
-                row_a,
+            keep, other = (
+                (row_a, row_b)
+                if row_a["created_at"] <= row_b["created_at"]
+                else (
+                    row_b,
+                    row_a,
+                )
             )
             keep_id, other_id = str(keep["cluster_id"]), str(other["cluster_id"])
 

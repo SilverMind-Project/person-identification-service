@@ -60,7 +60,10 @@ Rules:
   `face_height_px`, and nullable `interocular_px` (distance between the two SCRFD eye keypoints,
   computed only in `app/services/face_geometry.py`), measured in pixels of the submitted image;
   `IdentifyResponse` and each batch `FrameResult` carry `image_width_px` / `image_height_px`.
-  A value that cannot be measured is `null`, never `0.0`.
+  A value that cannot be measured is `null`, never `0.0`. `DetectedFace.geometry` is derived in
+  `__post_init__`, so every producer carries the same measurement.
+- Face quality is part of the identify contract (`quality`, see the face-confidence-calibration
+  skill); it is computed only in `app/services/face_quality.py`.
 - Side effects are explicit. `/identify` currently writes visitor sightings for unknown faces on
   every call (`_ingest_unknown_faces` in `app/routers/identification.py`); any new endpoint that
   writes must say so in its docstring and OpenAPI description, and read-only measurement tools

@@ -15,12 +15,13 @@ from app.models.identification import (
     BatchIdentifyRequest,
     BatchIdentifyResponse,
     FaceDetection,
+    FaceQualityModel,
     FrameResult,
     IdentifyRequest,
     IdentifyResponse,
     PersonMotion,
 )
-from app.observability.metrics import face_interocular_px
+from app.observability.metrics import face_interocular_px, face_quality_score
 from app.services.face_engine import decode_base64_image
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
@@ -52,12 +53,16 @@ async def _ingest_unknown_faces(
             logger.exception("Visitor sighting ingest failed; continuing")
 
 
-def _observe_face_geometry(identities: list[IdentifyResult]) -> None:
-    """Record interocular distance per recognition state so operators can see face resolution."""
+def _observe_face_measurements(identities: list[IdentifyResult]) -> None:
+    """Record interocular distance and quality per recognition state for camera sizing."""
     for identity in identities:
         if identity.interocular_px is not None:
             face_interocular_px.labels(recognition_state=identity.recognition_state).observe(
                 identity.interocular_px
+            )
+        if identity.quality is not None:
+            face_quality_score.labels(recognition_state=identity.recognition_state).observe(
+                identity.quality.score
             )
 
 
@@ -97,6 +102,18 @@ def _make_face_detection(
         face_width_px=r.face_width_px,
         face_height_px=r.face_height_px,
         interocular_px=r.interocular_px,
+        quality=(
+            FaceQualityModel(
+                score=r.quality.score,
+                resolution=r.quality.resolution,
+                sharpness=r.quality.sharpness,
+                detection=r.quality.detection,
+                pitch=r.quality.pitch,
+                version=r.quality.version,
+            )
+            if r.quality is not None
+            else None
+        ),
         calibrated_confidence=calibrated_confidence,
         calibration_status=evaluator.health(),
         calibration_artifact_version=evaluator.artifact_version(),
@@ -126,7 +143,7 @@ async def identify(request: Request, body: IdentifyRequest):
     image = decode_base64_image(body.image)
     faces = await engine.detect_faces(image)
     identities = await store.identify_all(faces)
-    _observe_face_geometry(identities)
+    _observe_face_measurements(identities)
 
     await _ingest_unknown_faces(request.app.state.visitor_store, image, faces, identities)
 
@@ -211,7 +228,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
         frame_shapes.append((image.shape[0], image.shape[1]))
         faces = await engine.detect_faces(image)
         identities = await store.identify_all(faces)
-        _observe_face_geometry(identities)
+        _observe_face_measurements(identities)
         all_faces.append(faces)
         all_identities.append(identities)
 

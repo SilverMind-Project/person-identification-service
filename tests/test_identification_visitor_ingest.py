@@ -107,9 +107,7 @@ class TestIdentificationVisitorIngest:
         store = VisitorStore(pool, _FakeMinioClient())
         image = np.zeros((200, 200, 3), dtype=np.uint8)
 
-        await _ingest_unknown_faces(
-            store, image, [_face(_embedding(1))], [_identity("unknown")]
-        )
+        await _ingest_unknown_faces(store, image, [_face(_embedding(1))], [_identity("unknown")])
 
         assert await _cluster_count(pool) == 1
 
@@ -118,9 +116,7 @@ class TestIdentificationVisitorIngest:
         store._clustering_enabled = False
         image = np.zeros((200, 200, 3), dtype=np.uint8)
 
-        await _ingest_unknown_faces(
-            store, image, [_face(_embedding(2))], [_identity("unknown")]
-        )
+        await _ingest_unknown_faces(store, image, [_face(_embedding(2))], [_identity("unknown")])
 
         assert await _cluster_count(pool) == 0
 

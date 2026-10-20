@@ -227,10 +227,13 @@ def compute_metrics(
 
     # Log loss (clamp to avoid log(0)).
     eps = 1e-15
-    ll = -sum(
-        y * math.log(max(p, eps)) + (1 - y) * math.log(max(1 - p, eps))
-        for p, y in zip(probs, labels, strict=True)
-    ) / n
+    ll = (
+        -sum(
+            y * math.log(max(p, eps)) + (1 - y) * math.log(max(1 - p, eps))
+            for p, y in zip(probs, labels, strict=True)
+        )
+        / n
+    )
 
     # ECE (10 equal-width bins).
     n_bins = 10
@@ -390,7 +393,9 @@ def write_artifact(artifact: CalibrationArtifact, output_path: Path) -> None:
         artifact.model_dump_json(indent=2),
         encoding="utf-8",
     )
-    logger.info("calibration_artifact_written path=%s version=%s", output_path, artifact.artifact_version)
+    logger.info(
+        "calibration_artifact_written path=%s version=%s", output_path, artifact.artifact_version
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -540,7 +545,4 @@ def load_pairs_json(path: Path) -> list[tuple[float, int, str]]:
     ]
     """
     raw: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
-    return [
-        (float(r["similarity"]), int(r["label"]), str(r["identity_id"]))
-        for r in raw
-    ]
+    return [(float(r["similarity"]), int(r["label"]), str(r["identity_id"])) for r in raw]

@@ -768,6 +768,7 @@ dependencies = [
 calibration-tools = [
     { name = "matplotlib" },
     { name = "scikit-learn" },
+    { name = "scipy" },
 ]
 dev = [
     { name = "mypy" },
@@ -802,6 +803,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "scikit-image", marker = "extra == 'model-tools'", specifier = "<0.26.0" },
     { name = "scikit-learn", marker = "extra == 'calibration-tools'", specifier = ">=1.5,<1.7" },
+    { name = "scipy", marker = "extra == 'calibration-tools'", specifier = ">=1.11" },
     { name = "triton-shared", git = "https://github.com/SilverMind-Project/triton-shared" },
     { name = "tritonclient", extras = ["grpc"], specifier = ">=2.51.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
