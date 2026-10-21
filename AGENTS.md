@@ -46,18 +46,21 @@ person-identification-service/
 │   ├── main.py              # App factory + lifespan (service wiring source of truth)
 │   ├── config.py            # YAML config loader with ${ENV_VAR:default} interpolation
 │   ├── calibration/
-│   │   ├── models.py        # CalibrationArtifact / manifest Pydantic models (JSON, never pickle)
+│   │   ├── models.py        # CalibrationArtifact (schema 1) and CalibrationArtifactV2 (schema 2) models (JSON, never pickle)
+│   │   ├── episodes.py      # Group captures into walks (one label, one camera, gaps under 300 s)
+│   │   ├── manifest.py      # Score manifest builder: household and external records (offline)
 │   │   ├── evaluator.py     # Runtime evaluator (stdlib + numpy only); health states
 │   │   ├── fit.py           # Offline fitter (scikit-learn; calibration-tools extra)
 │   │   ├── quality_breakpoints.py # Offline face quality anchor analysis (scipy; calibration-tools)
-│   │   └── cli.py           # fit / evaluate / inspect / validate commands
+│   │   └── cli.py           # fit / evaluate / inspect / validate / build-manifest / fit-v2 commands
 │   ├── db/
 │   │   └── migrate.py       # asyncpg migration runner (applies migrations/*.up.sql)
 │   ├── models/
 │   │   ├── enrollment.py    # EnrollRequest, EnrollResult, MemberInfo, MemberListResponse
 │   │   ├── identification.py # FaceDetection, IdentifyRequest/Response, BatchIdentifyRequest/Response, PersonMotion, FrameResult
 │   │   ├── motion.py        # MotionDetectionRequest/Response, PersonTrack, TrajectoryPoint
-│   │   └── visitor.py       # Visitor cluster list/detail/name envelopes
+│   │   ├── visitor.py       # Visitor cluster list/detail/name envelopes
+│   │   └── calibration_review.py # Calibration candidate list, label, and summary envelopes
 │   ├── observability/
 │   │   └── metrics.py       # Prometheus metrics (interocular and quality histograms, visitor counters)
 │   ├── routers/
@@ -65,7 +68,8 @@ person-identification-service/
 │   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
 │   │   ├── identification.py # POST /identify, POST /identify-batch
 │   │   ├── motion.py        # POST /detect-motion
-│   │   └── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
+│   │   ├── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
+│   │   └── calibration.py   # /calibration/candidates list, label, reject, delete; /calibration/summary
 │   └── services/
 │       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
@@ -74,6 +78,8 @@ person-identification-service/
 │       ├── enrollment_store.py # pgvector gallery: enroll, identify, remove
 │       ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
 │       ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
+│       ├── calibration_candidates.py # Calibration capture repository (Postgres + in-memory peers)
+│       ├── calibration_capture.py # Stratified capture policy, background crop upload, retention
 │       ├── minio_client.py    # boto3 S3 wrapper for MinIO
 │       ├── motion_detector.py # Cross-frame centroid tracking + direction classification
 │       ├── guest_store.py     # MinIO uploads for unidentified-person frames
@@ -112,6 +118,9 @@ uv sync --extra model-tools
 # Calibration toolchain (offline; never imported by the service)
 uv run --extra calibration-tools python -m app.calibration.cli fit --pairs pairs.json --output artifact.json
 uv run --extra calibration-tools python -m app.calibration.cli validate --artifact artifact.json
+# Schema 2 from household labels (read-only DB access; manifests hold private data)
+uv run --extra calibration-tools python -m app.calibration.cli build-manifest --output manifest.jsonl
+uv run --extra calibration-tools python -m app.calibration.cli fit-v2 --manifest manifest.jsonl --output artifact.json --allow-household-only
 
 # Code quality
 uv run ruff check .              # Lint
@@ -185,10 +194,10 @@ In `app.main` lifespan (order matters):
 4. `create_minio_client()`: MinIO client with bucket ensured
 5. Open `TritonGrpcClient`, build `FaceEngine`, and require all five configured models to be ready
 6. `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
-7. `VisitorStore(pool, minio_client)` plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters)
-8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, and preprocessing versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure
-9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_evaluator`
-10. On shutdown: cancel the retention task, close Triton, then close the database pool
+7. `VisitorStore(pool, minio_client)`, `CalibrationCaptureService` (started; seeds today's caps and runs its worker only when `calibration_capture.enabled`), plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters and expired calibration captures)
+8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, preprocessing, and quality scorer versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure
+9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_candidates`, `calibration_capture`, `calibration_evaluator`
+10. On shutdown: cancel the retention task, stop the capture worker, close Triton, then close the database pool
 
 ### 5.4 Configuration
 
@@ -318,6 +327,9 @@ Manages the visitor clustering subsystem (M06) for recurring unknown visitors.
 **Retention:**
 An async daily task deletes unnamed (`candidate`/`surfaced`/`dismissed`) clusters whose `last_seen_at` is older than `unnamed_retention_days` (60), including sightings and MinIO crops. Named clusters are exempt.
 
+**Calibration captures are not enrollment:**
+`CalibrationCaptureService` (`app/services/calibration_capture.py`) samples faces from tracker `/identify` calls into `calibration_candidates` (migration 0003), capped per (quality decile, nearest identity or `none`, camera) per UTC day. Capture runs in a bounded background queue and never fails or slows `/identify`. A label never changes the gallery; labeled rows are read only by the offline `build-manifest` command. Unlabeled and rejected rows are purged after `unlabeled_retention_days` (30) with their crops.
+
 **Naming is privileged:**
 The API exposes `/api/v1/visitors/clusters/{id}/name`. Naming is the single privileged transition: it moves biometric data from the visitor dataset into the enrollment dataset. Enrollment gains entries ONLY via explicit enroll calls or explicit operator naming of a visitor cluster; never automatically.
 
@@ -370,7 +382,7 @@ Enroll error handling:
 
 Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` (the raw cosine match score, never a probability) and its one-release alias `raw_similarity`, nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
 
-**Side effect:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
+**Side effects:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. On `/identify` only, a request with a `capture_context` (sent by tracking-orchestrator) offers its faces to `CalibrationCaptureService` (gated by `calibration_capture.enabled`), which keeps a stratified sample as calibration candidates in a background worker. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
 
 Batch endpoint handles per-image errors gracefully: bad frames are skipped and the response carries an empty `faces` list for them.
 
@@ -383,6 +395,17 @@ Batch endpoint handles per-image errors gracefully: bad frames are skipped and t
 | `POST` | `/api/v1/visitors/clusters/{cluster_id}/name` | Names the cluster into an enrolled member (the only privileged transition) |
 | `POST` | `/api/v1/visitors/clusters/{cluster_id}/dismiss` | Dismisses a cluster |
 | `POST` | `/api/v1/visitors/clusters/{cluster_a}/merge/{cluster_b}` | Merges two clusters |
+
+Calibration review (operator labeling of sampled faces; cognitive-companion proxies it and
+presigns the crop keys):
+
+| Method | Path | Response |
+| --- | --- | --- |
+| `GET` | `/api/v1/calibration/candidates` | Calibration captures, newest first (`state`, `limit`, `cursor`) |
+| `POST` | `/api/v1/calibration/candidates/{candidate_id}/label` | Label a capture: member, not enrolled, or not a face |
+| `POST` | `/api/v1/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable (purged with unlabeled ones) |
+| `DELETE` | `/api/v1/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
+| `GET` | `/api/v1/calibration/summary` | Labeling progress per identity, kind, quality decile, camera |
 
 ### Motion
 
@@ -484,7 +507,7 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
 
 ### Fixtures
 

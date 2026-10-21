@@ -9,6 +9,11 @@ Subcommands:
     evaluate    Evaluate an existing artifact against a labeled pairs dataset.
     inspect     Pretty-print the manifest fields of an artifact without running inference.
     validate    Validate artifact schema, monotonicity, and finite-range checks.
+    build-manifest  Turn labeled household captures (and an optional external research set)
+                into probe-versus-gallery score records with episode ids. Reads the database
+                read-only (DATABASE_URL); an external set needs Triton.
+    fit-v2      Fit a schema 2 artifact from a manifest with household-holdout gates; writes JSON
+                only when every gate passes.
 
 Requires the calibration-tools optional dependency group (scikit-learn, matplotlib).
 """
@@ -21,6 +26,10 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.calibration.manifest import ExternalFace
 
 
 def _cmd_fit(args: argparse.Namespace) -> int:
@@ -150,7 +159,7 @@ def _cmd_evaluate(args: argparse.Namespace) -> int:
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
     """Pretty-print artifact manifest fields."""
-    from app.calibration.models import CalibrationArtifact
+    from app.calibration.evaluator import parse_artifact
 
     path = Path(args.artifact)
     if not path.exists():
@@ -159,7 +168,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        artifact = CalibrationArtifact.model_validate(raw)
+        artifact = parse_artifact(raw)
     except Exception as exc:
         print(f"FAIL: could not parse artifact: {exc}")
         return 1
@@ -177,6 +186,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         expected_arcface_model_version=args.arcface_model_version or "",
         expected_model_profile=args.model_profile or "",
         expected_preprocessing_version=args.preprocessing_version or "",
+        expected_quality_version=args.quality_version or "",
     )
     state = evaluator.health()
     print(f"calibration_health: {state}")
@@ -184,6 +194,10 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"arcface_model:      {evaluator.arcface_model_version()}")
     print(f"model_profile:      {evaluator.model_profile()}")
     print(f"preprocessing:      {evaluator.preprocessing_version()}")
+    if evaluator.quality_version():
+        print(f"calibration_profile: {evaluator.calibration_profile()}")
+        print(f"quality_version:    {evaluator.quality_version()}")
+        print(f"covered_identities: {', '.join(evaluator.covered_identities() or []) or '(none)'}")
 
     if state == "ready":
         print("PASS")
@@ -191,6 +205,153 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     else:
         print("FAIL")
         return 1
+
+
+async def _build_manifest(args: argparse.Namespace) -> int:
+    import asyncpg
+    from pgvector.asyncpg import register_vector
+
+    from app import config
+    from app.calibration.manifest import (
+        GalleryEmbedding,
+        ManifestError,
+        ManifestMeta,
+        external_records,
+        household_records,
+        load_external_listing,
+        write_manifest,
+    )
+    from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
+    from app.services.enrollment_repository import PostgresEnrollmentRepository
+
+    dsn = config.get("database.dsn")
+    if not dsn:
+        print("FAIL: database.dsn is not configured (set DATABASE_URL)")
+        return 1
+
+    async def _init(conn: asyncpg.Connection) -> None:
+        await register_vector(conn)
+
+    # Read-only: this tool never writes enrollment, captures, or any other table.
+    pool = await asyncpg.create_pool(
+        dsn,
+        init=_init,
+        min_size=1,
+        max_size=2,
+        server_settings={"default_transaction_read_only": "on"},
+    )
+    try:
+        candidates = await PostgresCalibrationCandidateRepository(pool).list_labeled()
+        embeddings = await PostgresEnrollmentRepository(pool).member_embeddings()
+    finally:
+        await pool.close()
+
+    meta = ManifestMeta()
+    gallery = {pid: [GalleryEmbedding(e) for e in rows] for pid, rows in embeddings.items()}
+    try:
+        records = household_records(
+            candidates, gallery, episode_gap_s=args.episode_gap_s, meta=meta
+        )
+        if args.external:
+            entries, licence = load_external_listing(Path(args.external))
+            faces, dropped = await _detect_external(entries)
+            external = external_records(faces)
+            records.extend(external)
+            meta.external_datasets.append(
+                licence
+                | {
+                    "identities": len({f.identity_id for f in faces}),
+                    "images": len(entries),
+                    "images_without_face": dropped,
+                }
+            )
+            print(f"external: {len(entries)} images, {dropped} without a usable face")
+    except ManifestError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+
+    output = Path(args.output)
+    write_manifest(records, meta, output)
+    print(
+        f"wrote {len(records)} records ({meta.genuine} genuine, {meta.impostor} impostor) to {output}"
+    )
+    print(f"probes by identity: {meta.probes_by_identity}; open-set probes: {meta.open_set_probes}")
+    print(
+        f"skipped: not a face {meta.skipped_not_a_face}, identity not enrolled "
+        f"{meta.skipped_identity_not_enrolled}"
+    )
+    return 0
+
+
+async def _detect_external(
+    entries: list[tuple[Path, str]],
+) -> tuple[list[ExternalFace], int]:
+    from triton_shared.client import TritonGrpcClient
+
+    from app import config
+    from app.calibration.manifest import detect_external_faces
+    from app.services.face_engine import FaceEngine
+    from app.services.face_quality import build_face_quality_scorer
+
+    client = TritonGrpcClient(
+        str(config.get("face_engine.triton_url", "triton:8701")),
+        timeout_ms=int(config.get("face_engine.triton_timeout_ms", 30_000)),
+    )
+    async with client:
+        engine = FaceEngine(client, build_face_quality_scorer(config.get("face_quality", {})))
+        await engine.validate_models()
+        return await detect_external_faces(entries, engine)
+
+
+def _cmd_build_manifest(args: argparse.Namespace) -> int:
+    import asyncio
+
+    return asyncio.run(_build_manifest(args))
+
+
+def _cmd_fit_v2(args: argparse.Namespace) -> int:
+    from app.calibration.fit import DEFAULT_GATES_V2, run_fit_v2
+    from app.calibration.manifest import read_manifest
+
+    records, meta = read_manifest(Path(args.manifest))
+    gates = dict(DEFAULT_GATES_V2)
+    for key in (
+        "max_ece",
+        "max_brier_score",
+        "max_fmr_at_operating_point",
+        "min_holdout_genuine_per_identity",
+        "min_fit_identities",
+    ):
+        if getattr(args, key) is not None:
+            gates[key] = getattr(args, key)
+    result = run_fit_v2(
+        records,
+        meta,
+        model_profile=args.model_profile,
+        allow_household_only=args.allow_household_only,
+        gates=gates,
+        random_seed=args.random_seed,
+        output_path=Path(args.output) if args.output else None,
+    )
+    if result.leakage:
+        print("FAIL: leakage findings:")
+        for finding in result.leakage:
+            print(f"  {finding}")
+        return 1
+    print(json.dumps(result.report, indent=2, default=str))
+    if result.failures:
+        print("FAIL: gate failures:")
+        for failure in result.failures:
+            print(f"  FAIL {failure}")
+        return 1
+    assert result.artifact is not None
+    print(
+        f"PASS: artifact {result.artifact.artifact_version} ({result.artifact.fit_basis}), "
+        f"covers {result.artifact.covered_identities}"
+    )
+    if args.output:
+        print(f"  artifact written to: {args.output}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -239,6 +400,33 @@ def main(argv: list[str] | None = None) -> int:
     p_val.add_argument("--arcface-model-version", dest="arcface_model_version", default=None)
     p_val.add_argument("--model-profile", dest="model_profile", default=None)
     p_val.add_argument("--preprocessing-version", dest="preprocessing_version", default=None)
+    p_val.add_argument("--quality-version", dest="quality_version", default=None)
+
+    # -- build-manifest --
+    p_manifest = sub.add_parser("build-manifest", help="Build a v2 score manifest from labels")
+    p_manifest.add_argument("--output", required=True, help="manifest .jsonl path (private data)")
+    p_manifest.add_argument("--external", default=None, help="external set JSONL (needs Triton)")
+    p_manifest.add_argument("--episode-gap-s", dest="episode_gap_s", type=float, default=300.0)
+
+    # -- fit-v2 --
+    p_v2 = sub.add_parser("fit-v2", help="Fit a schema 2 artifact with household-holdout gates")
+    p_v2.add_argument("--manifest", required=True, help="manifest .jsonl from build-manifest")
+    p_v2.add_argument("--output", default=None, help="artifact path; omitted means dry run")
+    p_v2.add_argument("--model-profile", dest="model_profile", default="full")
+    p_v2.add_argument("--random-seed", dest="random_seed", type=int, default=42)
+    p_v2.add_argument(
+        "--allow-household-only",
+        dest="allow_household_only",
+        action="store_true",
+        help="fit without an external set (allowed for a household deployment; recorded)",
+    )
+    p_v2.add_argument("--max-ece", dest="max_ece", type=float, default=None)
+    p_v2.add_argument("--max-brier-score", dest="max_brier_score", type=float, default=None)
+    p_v2.add_argument("--max-fmr", dest="max_fmr_at_operating_point", type=float, default=None)
+    p_v2.add_argument(
+        "--min-holdout-genuine", dest="min_holdout_genuine_per_identity", type=int, default=None
+    )
+    p_v2.add_argument("--min-fit-identities", dest="min_fit_identities", type=int, default=None)
 
     ns = parser.parse_args(argv)
     match ns.command:
@@ -250,6 +438,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_inspect(ns)
         case "validate":
             return _cmd_validate(ns)
+        case "build-manifest":
+            return _cmd_build_manifest(ns)
+        case "fit-v2":
+            return _cmd_fit_v2(ns)
         case _:
             parser.print_help()
             return 1

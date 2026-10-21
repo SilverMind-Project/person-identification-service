@@ -116,6 +116,23 @@ face_quality:
     weight_pitch: 0.15
     component_floor: 0.01
 
+# Calibration capture: a stratified sample of live faces (aligned 112x112 crop in MinIO under
+# calibration/, embedding, quality, capture context) kept for an operator to label, so raw
+# similarity can be calibrated on this household's own cameras. Only /identify calls that carry a
+# capture_context (tracking-orchestrator) are sampled.
+# enabled: off by default; turn on for a 7 to 14 day collection window once every resident is
+#   enrolled and the gallery is stable, then off (or a lower per_bucket_per_day for drift checks).
+# per_bucket_per_day: captures kept per (quality decile, nearest identity, camera) per UTC day, so
+#   low-quality faces, which the calibrator needs most, are not crowded out by easy frontal ones.
+# unlabeled_retention_days: unlabeled and rejected captures (rows and crops) are deleted after this
+#   many days; labeled captures are the dataset and stay until an operator deletes them.
+# queue_size: captures waiting for upload; beyond it new captures are dropped and counted.
+calibration_capture:
+  enabled: false
+  per_bucket_per_day: 40
+  unlabeled_retention_days: 30
+  queue_size: 64
+
 # Visitor clustering (identity-continuity M06)
 # Persists unmatched face embeddings, clusters them across visits, and lets a
 # caregiver name a recurring visitor (nurse, handyman) into a household member.

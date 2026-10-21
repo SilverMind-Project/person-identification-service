@@ -25,6 +25,7 @@ from app.services.face_quality import (
     HeuristicQualityParams,
 )
 from app.services.motion_detector import MotionDetector
+from tests.calibration_fakes import disabled_capture
 from tests.gallery import one_member_store
 
 # Eyes 23 px apart: resolution component 0.5 under the default ramp (10 to 36 px).
@@ -83,6 +84,7 @@ def client() -> TestClient:
     )
     app.state.calibration_evaluator = CalibrationEvaluator(None, "degraded_missing")
     app.state.visitor_store = _NoopVisitorStore()
+    app.state.calibration_capture = disabled_capture()
     app.state.motion_detector = MotionDetector()
     return TestClient(app)
 

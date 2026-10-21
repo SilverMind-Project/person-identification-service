@@ -89,6 +89,8 @@ app/
     match_policy.py    # classify_match: nearest centroids to recognition state (pure)
     centroid.py        # Shared embedding insert + centroid recompute
     visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
+    calibration_candidates.py # Calibration capture repository (Postgres + in-memory peers)
+    calibration_capture.py # Stratified capture policy, background crop upload, retention
     minio_client.py    # boto3 S3 wrapper: upload_bytes(), generate_presigned_url(), delete_object()
     motion_detector.py # Cross-frame centroid tracking + direction classification
     guest_store.py     # Saves unidentified-person frames to MinIO + guest_visits hypertable
@@ -109,10 +111,10 @@ scripts/
 4. Create MinIO client, ensure bucket exists
 5. Open the Triton gRPC client, build `FaceEngine` with the quality scorer, and require all five Buffalo_L models to be ready
 6. Initialize `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
-7. Initialize `VisitorStore(pool, minio_client)` and start the daily visitor retention task
+7. Initialize `VisitorStore(pool, minio_client)`, start `CalibrationCaptureService` (seeds today's caps and starts its upload worker only when capture is enabled), and start the daily retention task (visitors and expired calibration captures)
 8. Load `CalibrationEvaluator` from `calibration.artifact_path` (degraded, never fatal, when missing or incompatible)
-9. Store services on `app.state` (face_engine, triton_client, enrollment_store, motion_detector, guest_store, visitor_store, calibration_evaluator)
-10. On shutdown, cancel the retention task, close Triton, then close the asyncpg pool
+9. Store services on `app.state` (face_engine, triton_client, enrollment_store, motion_detector, guest_store, visitor_store, calibration_candidates, calibration_capture, calibration_evaluator)
+10. On shutdown, cancel the retention task, stop the capture worker, close Triton, then close the asyncpg pool
 
 **Service injection**: Services are attached to `app.state` in the lifespan. Routers access them via `request.app.state.<service>`.
 
@@ -187,6 +189,7 @@ Tables:
 | `guest_visits` | Hypertable | id, guest_count, object_name, frame_index, created_at |
 | `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed) and running centroid |
 | `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
+| `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003) |
 
 Schema changes: new numbered SQL files in `migrations/` (`NNNN_name.up.sql` plus a matching `.down.sql`) applied by `app.db.migrate.run_migrations()`. `0001_initial_schema` is frozen; never edit it and never drop the database to apply a change. Uses an `alembic_version` tracking table (Alembic-compatible convention). Each migration runs in its own transaction.
 
@@ -214,9 +217,13 @@ Key settings:
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
 | `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
 | `recognition.unknown_threshold` | -- | `0.25` | Lower bound of the `candidate` band; below is `unrecognized` |
-| `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON; empty means `degraded_missing` |
+| `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON (schema 1 or 2); empty means `degraded_missing`. Schema 2 binds to the quality scorer version and covers only its listed identities |
 | `face_quality.scorer` | -- | `heuristic-v1` | Face quality scorer; unknown names fail startup |
 | `face_quality.heuristic.*` | -- | see settings | Ramp anchors and geometric-mean weights; a change is a new scorer version |
+| `calibration_capture.enabled` | -- | `false` | Sample faces from tracker `/identify` calls into the calibration set |
+| `calibration_capture.per_bucket_per_day` | -- | `40` | Cap per (quality decile, nearest identity, camera) per UTC day |
+| `calibration_capture.unlabeled_retention_days` | -- | `30` | Unlabeled and rejected captures (and crops) purged after this |
+| `calibration_capture.queue_size` | -- | `64` | Background capture queue; a full queue drops the offer |
 | `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
 | `motion.min_displacement_fraction` | -- | `0.05` | Min displacement for movement |
 | `motion.cross_frame_similarity` | -- | `0.5` | Unknown-face cross-frame linking |
@@ -250,6 +257,11 @@ Health and metrics are at the root; everything else is under `/api/v1`:
 | `POST` | `/api/v1/visitors/clusters/{cluster_id}/name` | Name a cluster into an enrolled member |
 | `POST` | `/api/v1/visitors/clusters/{cluster_id}/dismiss` | Dismiss a cluster |
 | `POST` | `/api/v1/visitors/clusters/{cluster_a}/merge/{cluster_b}` | Merge two clusters |
+| `GET` | `/api/v1/calibration/candidates` | Calibration captures, newest first (`state`, `limit`, `cursor`) |
+| `POST` | `/api/v1/calibration/candidates/{candidate_id}/label` | Label a capture: member, not enrolled, or not a face |
+| `POST` | `/api/v1/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable (purged with unlabeled ones) |
+| `DELETE` | `/api/v1/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
+| `GET` | `/api/v1/calibration/summary` | Labeling progress per identity, kind, quality decile, camera |
 
 ---
 

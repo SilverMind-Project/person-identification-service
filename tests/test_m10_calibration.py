@@ -92,13 +92,13 @@ def _make_evaluator(**overrides: Any) -> CalibrationEvaluator:
 def test_evaluator_missing_path_is_degraded_missing() -> None:
     ev = CalibrationEvaluator.from_artifact_path(None)
     assert ev.health() == "degraded_missing"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_nonexistent_path_is_degraded_missing(tmp_path: Path) -> None:
     ev = CalibrationEvaluator.from_artifact_path(tmp_path / "nope.json")
     assert ev.health() == "degraded_missing"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_malformed_json_is_degraded_invalid(tmp_path: Path) -> None:
@@ -106,7 +106,7 @@ def test_evaluator_malformed_json_is_degraded_invalid(tmp_path: Path) -> None:
     bad.write_text("{not valid json", encoding="utf-8")
     ev = CalibrationEvaluator.from_artifact_path(bad)
     assert ev.health() == "degraded_invalid"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_schema_invalid_is_degraded_invalid(tmp_path: Path) -> None:
@@ -117,7 +117,7 @@ def test_evaluator_schema_invalid_is_degraded_invalid(tmp_path: Path) -> None:
     p.write_text(json.dumps(raw), encoding="utf-8")
     ev = CalibrationEvaluator.from_artifact_path(p)
     assert ev.health() == "degraded_invalid"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_nonfinite_coef_is_degraded_invalid(tmp_path: Path) -> None:
@@ -126,7 +126,7 @@ def test_evaluator_nonfinite_coef_is_degraded_invalid(tmp_path: Path) -> None:
     p.write_text(json.dumps(raw), encoding="utf-8")
     ev = CalibrationEvaluator.from_artifact_path(p)
     assert ev.health() == "degraded_invalid"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_version_mismatch_is_degraded_incompatible(tmp_path: Path) -> None:
@@ -138,7 +138,7 @@ def test_evaluator_version_mismatch_is_degraded_incompatible(tmp_path: Path) -> 
         expected_arcface_model_version="buffalo_l",
     )
     assert ev.health() == "degraded_incompatible"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_model_profile_mismatch_is_degraded_incompatible(tmp_path: Path) -> None:
@@ -150,7 +150,7 @@ def test_evaluator_model_profile_mismatch_is_degraded_incompatible(tmp_path: Pat
         expected_model_profile="full",
     )
     assert ev.health() == "degraded_incompatible"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_preprocessing_version_mismatch_is_degraded_incompatible(tmp_path: Path) -> None:
@@ -162,7 +162,7 @@ def test_evaluator_preprocessing_version_mismatch_is_degraded_incompatible(tmp_p
         expected_preprocessing_version="v1",
     )
     assert ev.health() == "degraded_incompatible"
-    assert ev.predict(0.8) is None
+    assert ev.predict({"similarity": 0.8}, "resident-alpha") is None
 
 
 def test_evaluator_valid_logistic_is_ready() -> None:
@@ -200,7 +200,7 @@ def test_evaluator_isotonic_non_monotone_is_degraded_invalid(tmp_path: Path) -> 
     p.write_text(json.dumps(raw), encoding="utf-8")
     ev = CalibrationEvaluator.from_artifact_path(p)
     assert ev.health() == "degraded_invalid"
-    assert ev.predict(0.5) is None
+    assert ev.predict({"similarity": 0.5}, "resident-alpha") is None
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +219,7 @@ _LOGISTIC_CASES: list[tuple[float, float]] = [
 def test_logistic_evaluator_matches_formula() -> None:
     ev = _make_evaluator(coef=5.0, intercept=-2.0)
     for sim, expected in _LOGISTIC_CASES:
-        got = ev.predict(sim)
+        got = ev.predict({"similarity": sim}, "resident-alpha")
         assert got is not None
         assert abs(got - expected) < 1e-9, f"sim={sim}: got {got}, expected {expected}"
 
@@ -227,7 +227,7 @@ def test_logistic_evaluator_matches_formula() -> None:
 def test_logistic_evaluator_output_in_range() -> None:
     ev = _make_evaluator()
     for sim in [-1.0, -0.5, 0.0, 0.3, 0.5, 0.8, 1.0, 1.5]:
-        result = ev.predict(sim)
+        result = ev.predict({"similarity": sim}, "resident-alpha")
         assert result is not None
         assert 0.0 <= result <= 1.0, f"out of range for sim={sim}: {result}"
 
@@ -263,21 +263,21 @@ def _make_isotonic_evaluator(
 def test_isotonic_evaluator_identity_line() -> None:
     ev = _make_isotonic_evaluator()
     for x in [0.0, 0.25, 0.5, 0.75, 1.0]:
-        result = ev.predict(x)
+        result = ev.predict({"similarity": x}, "resident-alpha")
         assert result is not None
         assert abs(result - x) < 1e-9, f"expected {x}, got {result}"
 
 
 def test_isotonic_evaluator_clamp_below() -> None:
     ev = _make_isotonic_evaluator()
-    result = ev.predict(-0.5)
+    result = ev.predict({"similarity": -0.5}, "resident-alpha")
     assert result is not None
     assert abs(result - 0.0) < 1e-9
 
 
 def test_isotonic_evaluator_clamp_above() -> None:
     ev = _make_isotonic_evaluator()
-    result = ev.predict(2.0)
+    result = ev.predict({"similarity": 2.0}, "resident-alpha")
     assert result is not None
     assert abs(result - 1.0) < 1e-9
 
@@ -289,11 +289,11 @@ def test_isotonic_evaluator_nonidentity_knots() -> None:
         y_knots=[0.0, 0.3, 0.9],
     )
     # at x=0.5, expect 0.3
-    result_mid = ev.predict(0.5)
+    result_mid = ev.predict({"similarity": 0.5}, "resident-alpha")
     assert result_mid is not None
     assert abs(result_mid - 0.3) < 1e-9
     # at x=0.75, expect 0.3 + (0.9-0.3)*(0.75-0.5)/(1.0-0.5) = 0.3 + 0.6*0.5 = 0.6
-    result_75 = ev.predict(0.75)
+    result_75 = ev.predict({"similarity": 0.75}, "resident-alpha")
     assert result_75 is not None
     assert abs(result_75 - 0.6) < 1e-9
 
@@ -326,7 +326,7 @@ def test_committed_isotonic_artifact_is_ready() -> None:
 def test_committed_logistic_artifact_at_known_point() -> None:
     """The committed logistic artifact uses coef=5.0, intercept=-2.0."""
     ev = CalibrationEvaluator.from_artifact_path(_LOGISTIC_ARTIFACT)
-    p_at_04 = ev.predict(0.4)  # at decision boundary
+    p_at_04 = ev.predict({"similarity": 0.4}, "resident-alpha")  # at decision boundary
     assert p_at_04 is not None
     assert abs(p_at_04 - 0.5) < 1e-9
 
@@ -335,7 +335,7 @@ def test_committed_isotonic_artifact_monotone() -> None:
     ev = CalibrationEvaluator.from_artifact_path(_ISOTONIC_ARTIFACT)
     prev = -1.0
     for x in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]:
-        p = ev.predict(x)
+        p = ev.predict({"similarity": x}, "resident-alpha")
         assert p is not None
         assert p >= prev - 1e-9, f"non-monotone at x={x}: {p} < {prev}"
         prev = p

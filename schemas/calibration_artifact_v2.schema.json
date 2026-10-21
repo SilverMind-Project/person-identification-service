@@ -1,0 +1,397 @@
+{
+  "$defs": {
+    "CalibrationMetrics": {
+      "description": "Evaluation metrics recorded at fit time (test split).",
+      "properties": {
+        "brier_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Brier Score"
+        },
+        "log_loss": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Log Loss"
+        },
+        "ece": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ece"
+        },
+        "fmr_at_operating_point": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fmr At Operating Point"
+        },
+        "fnmr_at_operating_point": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fnmr At Operating Point"
+        },
+        "operating_point_threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operating Point Threshold"
+        }
+      },
+      "title": "CalibrationMetrics",
+      "type": "object"
+    },
+    "ExternalDatasetRef": {
+      "description": "An external face set pooled into the fit; never part of a gate.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "licence": {
+          "minLength": 1,
+          "title": "Licence",
+          "type": "string"
+        },
+        "identities": {
+          "default": 0,
+          "title": "Identities",
+          "type": "integer"
+        },
+        "images": {
+          "default": 0,
+          "title": "Images",
+          "type": "integer"
+        },
+        "images_without_face": {
+          "default": 0,
+          "title": "Images Without Face",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "licence"
+      ],
+      "title": "ExternalDatasetRef",
+      "type": "object"
+    },
+    "SplitCounts": {
+      "description": "Pair and identity counts for each data partition.",
+      "properties": {
+        "fit_pairs": {
+          "default": 0,
+          "title": "Fit Pairs",
+          "type": "integer"
+        },
+        "fit_positives": {
+          "default": 0,
+          "title": "Fit Positives",
+          "type": "integer"
+        },
+        "fit_negatives": {
+          "default": 0,
+          "title": "Fit Negatives",
+          "type": "integer"
+        },
+        "val_pairs": {
+          "default": 0,
+          "title": "Val Pairs",
+          "type": "integer"
+        },
+        "val_positives": {
+          "default": 0,
+          "title": "Val Positives",
+          "type": "integer"
+        },
+        "val_negatives": {
+          "default": 0,
+          "title": "Val Negatives",
+          "type": "integer"
+        },
+        "test_pairs": {
+          "default": 0,
+          "title": "Test Pairs",
+          "type": "integer"
+        },
+        "test_positives": {
+          "default": 0,
+          "title": "Test Positives",
+          "type": "integer"
+        },
+        "test_negatives": {
+          "default": 0,
+          "title": "Test Negatives",
+          "type": "integer"
+        },
+        "fit_identities": {
+          "default": 0,
+          "title": "Fit Identities",
+          "type": "integer"
+        },
+        "val_identities": {
+          "default": 0,
+          "title": "Val Identities",
+          "type": "integer"
+        },
+        "test_identities": {
+          "default": 0,
+          "title": "Test Identities",
+          "type": "integer"
+        }
+      },
+      "title": "SplitCounts",
+      "type": "object"
+    }
+  },
+  "description": "Schema 2: multi-feature calibration fitted on this household's own captures.\n\n``logistic_v2``: P(match | x) = sigmoid(intercept + sum(coefficients[i] * x[features[i]])), with\ncoefficients in raw feature space so the runtime needs no scaler. ``isotonic`` keeps one\nfeature (``similarity``). The runtime returns no calibrated confidence for any identity outside\n``covered_identities`` (fail closed per identity: someone enrolled after the fit, or with too\nfew holdout faces, has to be recalibrated first).",
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "default": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "artifact_version": {
+      "title": "Artifact Version",
+      "type": "string"
+    },
+    "method": {
+      "enum": [
+        "logistic_v2",
+        "isotonic"
+      ],
+      "title": "Method",
+      "type": "string"
+    },
+    "arcface_model_version": {
+      "title": "Arcface Model Version",
+      "type": "string"
+    },
+    "model_profile": {
+      "title": "Model Profile",
+      "type": "string"
+    },
+    "preprocessing_version": {
+      "title": "Preprocessing Version",
+      "type": "string"
+    },
+    "fitted_at": {
+      "format": "date-time",
+      "title": "Fitted At",
+      "type": "string"
+    },
+    "random_seed": {
+      "default": 42,
+      "title": "Random Seed",
+      "type": "integer"
+    },
+    "tool_version": {
+      "default": "",
+      "title": "Tool Version",
+      "type": "string"
+    },
+    "fit_dataset_hash": {
+      "default": "",
+      "title": "Fit Dataset Hash",
+      "type": "string"
+    },
+    "val_dataset_hash": {
+      "default": "",
+      "title": "Val Dataset Hash",
+      "type": "string"
+    },
+    "test_dataset_hash": {
+      "default": "",
+      "title": "Test Dataset Hash",
+      "type": "string"
+    },
+    "split_counts": {
+      "$ref": "#/$defs/SplitCounts"
+    },
+    "metrics": {
+      "$ref": "#/$defs/CalibrationMetrics"
+    },
+    "profile": {
+      "default": "single_frame",
+      "enum": [
+        "single_frame",
+        "template"
+      ],
+      "title": "Profile",
+      "type": "string"
+    },
+    "quality_version": {
+      "minLength": 1,
+      "title": "Quality Version",
+      "type": "string"
+    },
+    "features": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Features",
+      "type": "array"
+    },
+    "coefficients": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Coefficients"
+    },
+    "intercept": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Intercept"
+    },
+    "x_knots": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "X Knots"
+    },
+    "y_knots": {
+      "anyOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Y Knots"
+    },
+    "covered_identities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Covered Identities",
+      "type": "array"
+    },
+    "fit_basis": {
+      "enum": [
+        "household_only",
+        "pooled"
+      ],
+      "title": "Fit Basis",
+      "type": "string"
+    },
+    "capture_profile": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Capture Profile",
+      "type": "object"
+    },
+    "household_holdout_metrics": {
+      "$ref": "#/$defs/CalibrationMetrics"
+    },
+    "open_set_fmr_at_operating_point": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Open Set Fmr At Operating Point"
+    },
+    "external_datasets": {
+      "items": {
+        "$ref": "#/$defs/ExternalDatasetRef"
+      },
+      "title": "External Datasets",
+      "type": "array"
+    }
+  },
+  "required": [
+    "artifact_version",
+    "method",
+    "arcface_model_version",
+    "model_profile",
+    "preprocessing_version",
+    "fitted_at",
+    "quality_version",
+    "features",
+    "fit_basis"
+  ],
+  "title": "CalibrationArtifactV2",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration_artifact_v2.schema.json"
+}

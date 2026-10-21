@@ -32,6 +32,12 @@ services:
       MINIO_BUCKET: "${MINIO_BUCKET:?err}"
       TRITON_GRPC_URL: "${TRITON_GRPC_URL:-triton:8701}"
       PERSON_ID_MODEL_PROFILE: "${PERSON_ID_MODEL_PROFILE:-full}"
+      # Empty means no calibration (calibrated_confidence stays null). After fitting, copy the
+      # artifact to ./calibration/artifact.json and set this to /app/calibration/artifact.json.
+      CALIBRATION_ARTIFACT_PATH: "${CALIBRATION_ARTIFACT_PATH:-}"
+    volumes:
+      # Calibration artifacts are private household data: never committed (see .gitignore).
+      - "${CALIBRATION_ARTIFACT_DIR:-./calibration}:/app/calibration:ro"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8200/health')"]
       interval: 30s

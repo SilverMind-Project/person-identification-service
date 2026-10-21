@@ -19,6 +19,7 @@ from app.models.identification import FaceDetection
 from app.routers import identification
 from app.services.face_models import DetectedFace
 from app.services.motion_detector import MotionDetector
+from tests.calibration_fakes import disabled_capture
 from tests.gallery import one_member_store
 
 _IMAGE_WIDTH_PX = 96
@@ -69,6 +70,7 @@ def client() -> TestClient:
     )
     app.state.calibration_evaluator = CalibrationEvaluator(None, "degraded_missing")
     app.state.visitor_store = _NoopVisitorStore()
+    app.state.calibration_capture = disabled_capture()
     app.state.motion_detector = MotionDetector()
     return TestClient(app)
 

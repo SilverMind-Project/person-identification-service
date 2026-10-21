@@ -64,6 +64,10 @@ class EnrollmentRepository(Protocol):
 
     async def member_count(self) -> int: ...
 
+    async def member_embeddings(self) -> dict[str, list[np.ndarray]]:
+        """Every member's enrollment embeddings, oldest first (for offline calibration)."""
+        ...
+
 
 _SQL_NEAREST = """SELECT m.person_id, m.name,
        1.0 - (c.centroid <=> $1::vector) AS similarity
@@ -172,6 +176,18 @@ class PostgresEnrollmentRepository:
             row = await conn.fetchrow("SELECT count(*) AS cnt FROM members")
         return int(row["cnt"])
 
+    async def member_embeddings(self) -> dict[str, list[np.ndarray]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT person_id, embedding FROM embeddings ORDER BY person_id, created_at, id"
+            )
+        gallery: dict[str, list[np.ndarray]] = {}
+        for r in rows:
+            gallery.setdefault(r["person_id"], []).append(
+                np.asarray(r["embedding"], dtype=np.float32)
+            )
+        return gallery
+
 
 @dataclass
 class _Member:
@@ -252,6 +268,13 @@ class InMemoryEnrollmentRepository:
 
     async def member_count(self) -> int:
         return len(self._members)
+
+    async def member_embeddings(self) -> dict[str, list[np.ndarray]]:
+        return {
+            person_id: list(embeddings)
+            for person_id, embeddings in sorted(self._embeddings.items())
+            if embeddings
+        }
 
     def _info(self, person_id: str) -> MemberInfo:
         member = self._members[person_id]

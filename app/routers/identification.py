@@ -14,6 +14,7 @@ from app import config
 from app.models.identification import (
     BatchIdentifyRequest,
     BatchIdentifyResponse,
+    CaptureContext,
     FaceDetection,
     FaceQualityModel,
     FrameResult,
@@ -22,6 +23,7 @@ from app.models.identification import (
     PersonMotion,
 )
 from app.observability.metrics import face_interocular_px, face_quality_score
+from app.services.calibration_capture import CaptureContext as CalibrationCaptureContext
 from app.services.face_engine import decode_base64_image
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
@@ -72,6 +74,20 @@ def _encode_image_to_base64(image) -> str:
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
+def _calibration_features(r: IdentifyResult) -> dict[str, float]:
+    """The feature map a calibration artifact evaluates: similarity plus face-quality scores."""
+    features = {"similarity": r.similarity}
+    if r.quality is not None:
+        features |= {
+            "quality_score": r.quality.score,
+            "resolution": r.quality.resolution,
+            "sharpness": r.quality.sharpness,
+            "detection": r.quality.detection,
+            "pitch": r.quality.pitch,
+        }
+    return features
+
+
 def _make_face_detection(
     r,
     evaluator,
@@ -86,7 +102,7 @@ def _make_face_detection(
     """
     calibrated_confidence: float | None = None
     if r.recognition_state == "recognized":
-        calibrated_confidence = evaluator.predict(r.similarity)
+        calibrated_confidence = evaluator.predict(_calibration_features(r), r.best_candidate_id)
 
     return FaceDetection(
         person_id=r.person_id,
@@ -116,6 +132,7 @@ def _make_face_detection(
         ),
         calibrated_confidence=calibrated_confidence,
         calibration_status=evaluator.health(),
+        calibration_profile=evaluator.calibration_profile(),
         calibration_artifact_version=evaluator.artifact_version(),
         arcface_model_version=active_arcface_version,
         model_profile=active_model_profile,
@@ -123,9 +140,26 @@ def _make_face_detection(
     )
 
 
+def _capture_context(context: CaptureContext | None) -> CalibrationCaptureContext | None:
+    if context is None:
+        return None
+    return CalibrationCaptureContext(
+        camera_id=context.camera_id,
+        captured_at=context.captured_at,
+        crop_pad_top_frac=context.crop_pad_top_frac,
+        crop_pad_side_frac=context.crop_pad_side_frac,
+        crop_jpeg_quality=context.crop_jpeg_quality,
+    )
+
+
 @router.post("/identify", response_model=IdentifyResponse)
 async def identify(request: Request, body: IdentifyRequest):
-    """Identify faces in a single image."""
+    """Identify faces in a single image.
+
+    Side effects: unknown faces are recorded as visitor sightings; with calibration capture
+    enabled and a ``capture_context`` in the request, a stratified sample of faces is stored as
+    calibration candidates (aligned crop, embedding, quality) for operator labeling.
+    """
     logger.info(
         "POST /identify image_size=%d include_annotated=%s save_guests=%s",
         len(body.image),
@@ -146,6 +180,9 @@ async def identify(request: Request, body: IdentifyRequest):
     _observe_face_measurements(identities)
 
     await _ingest_unknown_faces(request.app.state.visitor_store, image, faces, identities)
+    request.app.state.calibration_capture.offer(
+        image, faces, identities, _capture_context(body.capture_context)
+    )
 
     # Save the full image if any unidentified guests are present
     if body.save_guest_images:

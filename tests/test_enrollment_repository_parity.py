@@ -74,6 +74,10 @@ async def _exercise(repo: EnrollmentRepository) -> dict[str, object]:
     record["exists"] = [await repo.member_exists(pid) for pid in ("p-alpha", "p-zeta")]
     record["counts"] = [await repo.embedding_count(pid) for pid in ("p-alpha", "p-delta", "p-zeta")]
     record["member_count"] = await repo.member_count()
+    record["member_embeddings"] = {
+        pid: [[round(float(v), 5) for v in e[:8]] for e in embeddings]
+        for pid, embeddings in (await repo.member_embeddings()).items()
+    }
     beta = await repo.get_member("p-beta")
     record["get"] = (beta.person_id, beta.name, beta.embedding_count) if beta else None
     record["get_missing"] = await repo.get_member("p-zeta")

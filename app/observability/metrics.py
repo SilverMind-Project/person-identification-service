@@ -25,6 +25,13 @@ face_quality_score = Histogram(
     buckets=(0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
 )
 
+calibration_captures_total = Counter(
+    "pid_calibration_captures_total",
+    "Faces offered for calibration capture, by outcome: queued, stored, failed, skipped_cap, "
+    "skipped_queue_full, skipped_unscored, skipped_no_keypoints, skipped_low_detection.",
+    ["result"],
+)
+
 visitor_sightings_recorded_total = Counter(
     "pid_visitor_sightings_recorded_total",
     "Unmatched face sightings persisted into the visitor cluster store.",

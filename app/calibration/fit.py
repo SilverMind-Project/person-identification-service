@@ -15,14 +15,23 @@ import hashlib
 import json
 import logging
 import math
+import random
 import uuid
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from app.calibration.episodes import NOT_ENROLLED
+from app.calibration.manifest import ScoreRecord
 from app.calibration.models import (
     CalibrationArtifact,
+    CalibrationArtifactV2,
     CalibrationMetrics,
+    ExternalDatasetRef,
     SplitCounts,
 )
 
@@ -103,7 +112,6 @@ def split_pairs_by_identity(
         (fit_pairs, val_pairs, test_pairs, fit_ids, val_ids, test_ids)
         where *_pairs are (similarity, label) tuples and *_ids are identity ID sets.
     """
-    import random  # stdlib is fine here
 
     all_ids = sorted({ident for _, _, ident in pairs})
     rng = random.Random(random_seed)
@@ -220,6 +228,15 @@ def compute_metrics(
         else:
             probs.append(0.5)
 
+    return metrics_from_probabilities(probs, labels, operating_point)
+
+
+def metrics_from_probabilities(
+    probs: list[float], labels: list[float], operating_point: float
+) -> CalibrationMetrics:
+    """Brier score, log loss, 10-bin ECE, and FMR/FNMR at the operating point."""
+    if not probs:
+        return CalibrationMetrics()
     n = len(labels)
 
     # Brier score.
@@ -546,3 +563,355 @@ def load_pairs_json(path: Path) -> list[tuple[float, int, str]]:
     """
     raw: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
     return [(float(r["similarity"]), int(r["label"]), str(r["identity_id"])) for r in raw]
+
+
+# ---------------------------------------------------------------------------
+# Schema 2: multi-feature fit on household captures (episode splits, holdout gates)
+# ---------------------------------------------------------------------------
+
+DEFAULT_GATES_V2: dict[str, float] = {
+    "max_ece": 0.05,
+    "max_brier_score": 0.10,
+    # Applies to closed-set and open-set impostors together, and to open-set alone.
+    "max_fmr_at_operating_point": 0.01,
+    "operating_point_threshold": 0.80,
+    # Holdout genuine faces an identity needs before the artifact covers it.
+    "min_holdout_genuine_per_identity": 30,
+    # Household plus external identities in the fit split.
+    "min_fit_identities": 5,
+}
+FEATURE_SETS: tuple[tuple[str, ...], ...] = (
+    ("similarity", "quality_score"),
+    ("similarity", "resolution", "sharpness"),
+)
+
+
+@dataclass
+class RecordSplit:
+    fit: list[ScoreRecord] = field(default_factory=list)
+    val: list[ScoreRecord] = field(default_factory=list)
+    holdout: list[ScoreRecord] = field(default_factory=list)
+    leakage: list[str] = field(default_factory=list)
+
+
+def _probe_group(record: ScoreRecord) -> str:
+    return record.probe_identity_id or NOT_ENROLLED
+
+
+def split_records(
+    records: Sequence[ScoreRecord],
+    *,
+    random_seed: int = 42,
+    fit_frac: float = 0.6,
+    val_frac: float = 0.2,
+) -> RecordSplit:
+    """Split household records by episode (stratified by identity), external ones by identity.
+
+    Every record of one episode lands in one partition, so adjacent frames of a walk never sit in
+    both fit and holdout. External identities go to fit or validation only: the holdout, which
+    the gates read, is household data alone.
+    """
+    rng = random.Random(random_seed)
+    split = RecordSplit()
+    assignment: dict[str, str] = {}
+
+    household = [r for r in records if r.dataset == "household"]
+    episodes_by_group: dict[str, set[str]] = {}
+    groups_by_episode: dict[str, set[str]] = {}
+    for r in household:
+        episodes_by_group.setdefault(_probe_group(r), set()).add(r.episode_id)
+        groups_by_episode.setdefault(r.episode_id, set()).add(_probe_group(r))
+    # An episode is one person's walk: two labels in one episode means mislabeled data.
+    split.leakage.extend(
+        f"episode {episode} carries labels {sorted(groups)}"
+        for episode, groups in sorted(groups_by_episode.items())
+        if len(groups) > 1
+    )
+    if split.leakage:
+        return split
+    for group in sorted(episodes_by_group):
+        episodes = sorted(episodes_by_group[group])
+        rng.shuffle(episodes)
+        n = len(episodes)
+        n_holdout = max(1, round(n * (1.0 - fit_frac - val_frac))) if n >= 3 else 0
+        n_val = max(1, round(n * val_frac)) if n >= 3 else 0
+        for index, episode in enumerate(episodes):
+            if index < n_holdout:
+                assignment[episode] = "holdout"
+            elif index < n_holdout + n_val:
+                assignment[episode] = "val"
+            else:
+                assignment[episode] = "fit"
+
+    external_ids = sorted({_probe_group(r) for r in records if r.dataset == "external"})
+    rng.shuffle(external_ids)
+    n_external_val = round(len(external_ids) * val_frac / (fit_frac + val_frac))
+    external_partition = {
+        identity: ("val" if index < n_external_val else "fit")
+        for index, identity in enumerate(external_ids)
+    }
+
+    for r in records:
+        part = (
+            assignment[r.episode_id]
+            if r.dataset == "household"
+            else external_partition[_probe_group(r)]
+        )
+        getattr(split, part).append(r)
+
+    seen: dict[str, str] = {}
+    for part in ("fit", "val", "holdout"):
+        for r in getattr(split, part):
+            key = (
+                r.episode_id if r.dataset == "household" else f"external-identity:{_probe_group(r)}"
+            )
+            if seen.setdefault(key, part) != part:
+                split.leakage.append(f"{key} appears in {seen[key]} and {part}")
+    return split
+
+
+def _matrix(records: Sequence[ScoreRecord], features: Sequence[str]) -> list[list[float]]:
+    return [[float(getattr(r, name)) for name in features] for r in records]
+
+
+def fit_logistic_v2(
+    records: Sequence[ScoreRecord], features: Sequence[str], random_seed: int = 42
+) -> tuple[list[float], float]:
+    """Logistic regression on standardized features; returns raw-space (coefficients, intercept).
+
+    Coefficients are de-standardized (w / sigma, b - sum(w * mu / sigma)) so the runtime applies
+    them to raw feature values with no scaler. Requires scikit-learn (calibration-tools extra).
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    x = np.asarray(_matrix(records, features), dtype=np.float64)
+    y = np.asarray([r.label for r in records], dtype=np.int64)
+    if len(set(y.tolist())) < 2:
+        raise ValueError("the fit split needs both genuine and impostor records")
+    mu = x.mean(axis=0)
+    sigma = x.std(axis=0)
+    sigma[sigma == 0.0] = 1.0
+    clf = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000, random_state=random_seed)
+    clf.fit((x - mu) / sigma, y)
+    weights = clf.coef_[0] / sigma
+    intercept = float(clf.intercept_[0] - np.sum(clf.coef_[0] * mu / sigma))
+    return [float(w) for w in weights], intercept
+
+
+def predict_logistic_v2(
+    records: Sequence[ScoreRecord],
+    features: Sequence[str],
+    coefficients: Sequence[float],
+    intercept: float,
+) -> list[float]:
+    z = (
+        np.asarray(_matrix(records, features), dtype=np.float64) @ np.asarray(coefficients)
+        + intercept
+    )
+    return [float(v) for v in 1.0 / (1.0 + np.exp(-z))]
+
+
+def reliability_bins(
+    probs: Sequence[float], labels: Sequence[int], n_bins: int = 10
+) -> list[dict[str, float]]:
+    """Per equal-width bin: count, mean predicted probability, observed match rate."""
+    bins: list[dict[str, float]] = []
+    for b in range(n_bins):
+        lo, hi = b / n_bins, (b + 1) / n_bins
+        members = [
+            (p, y)
+            for p, y in zip(probs, labels, strict=True)
+            if lo <= p < hi or (b == n_bins - 1 and p == 1.0)
+        ]
+        if members:
+            bins.append(
+                {
+                    "lo": lo,
+                    "hi": hi,
+                    "count": len(members),
+                    "mean_predicted": sum(p for p, _ in members) / len(members),
+                    "observed_rate": sum(y for _, y in members) / len(members),
+                }
+            )
+    return bins
+
+
+@dataclass
+class FitV2Result:
+    artifact: CalibrationArtifactV2 | None
+    failures: list[str]
+    leakage: list[str]
+    report: dict[str, Any] = field(default_factory=dict)
+
+
+def _hash_records(records: Sequence[ScoreRecord]) -> str:
+    raw = json.dumps(sorted(json.dumps(asdict(r), sort_keys=True) for r in records)).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _log_loss(probs: Sequence[float], labels: Sequence[int]) -> float:
+    eps = 1e-15
+    return -sum(
+        y * math.log(max(p, eps)) + (1 - y) * math.log(max(1 - p, eps))
+        for p, y in zip(probs, labels, strict=True)
+    ) / max(len(labels), 1)
+
+
+def run_fit_v2(
+    records: Sequence[ScoreRecord],
+    meta: dict[str, Any],
+    *,
+    model_profile: str,
+    allow_household_only: bool = False,
+    gates: dict[str, float] | None = None,
+    random_seed: int = 42,
+    output_path: Path | None = None,
+    tool_version: str = "2.0.0",
+) -> FitV2Result:
+    """Fit, gate on the household holdout, and write a schema 2 artifact only if every gate passes."""
+    g = {**DEFAULT_GATES_V2, **(gates or {})}
+    operating_point = float(g["operating_point_threshold"])
+    has_external = any(r.dataset == "external" for r in records)
+    if not has_external and not allow_household_only:
+        return FitV2Result(
+            None,
+            ["household-only fit refused: pass --allow-household-only or add an external set"],
+            [],
+        )
+    if not any(r.dataset == "household" for r in records):
+        return FitV2Result(None, ["no household records: the gates need a household holdout"], [])
+
+    split = split_records(records, random_seed=random_seed)
+    if split.leakage:
+        return FitV2Result(None, [], split.leakage)
+    holdout = split.holdout
+    if not split.fit or not split.val or not holdout:
+        return FitV2Result(
+            None,
+            [
+                f"every partition needs records (fit={len(split.fit)} val={len(split.val)} "
+                f"holdout={len(holdout)}); label more episodes"
+            ],
+            [],
+        )
+
+    report: dict[str, Any] = {"feature_sets": {}}
+    best: tuple[float, int, tuple[str, ...], list[float], float] | None = None
+    for features in FEATURE_SETS:
+        try:
+            coefficients, intercept = fit_logistic_v2(split.fit, features, random_seed)
+        except ValueError as exc:
+            return FitV2Result(None, [str(exc)], [])
+        val_loss = _log_loss(
+            predict_logistic_v2(split.val, features, coefficients, intercept),
+            [r.label for r in split.val],
+        )
+        report["feature_sets"]["+".join(features)] = round(val_loss, 6)
+        # Lower validation log loss wins; on a tie the smaller feature set is kept.
+        candidate = (round(val_loss, 9), len(features), features, coefficients, intercept)
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+    assert best is not None
+    _, _, features, coefficients, intercept = best
+
+    holdout_probs = predict_logistic_v2(holdout, features, coefficients, intercept)
+    holdout_labels = [r.label for r in holdout]
+    metrics = metrics_from_probabilities(
+        holdout_probs, [float(y) for y in holdout_labels], operating_point
+    )
+    open_set = [
+        p for p, r in zip(holdout_probs, holdout, strict=True) if r.probe_identity_id is None
+    ]
+    open_set_fmr = (
+        sum(1 for p in open_set if p >= operating_point) / len(open_set) if open_set else None
+    )
+    genuine_by_identity: dict[str, int] = {}
+    for r in holdout:
+        if r.label == 1:
+            genuine_by_identity[r.identity_id] = genuine_by_identity.get(r.identity_id, 0) + 1
+    covered = sorted(
+        identity
+        for identity, count in genuine_by_identity.items()
+        if count >= g["min_holdout_genuine_per_identity"]
+    )
+    fit_identities = {r.probe_identity_id for r in split.fit if r.probe_identity_id is not None}
+
+    failures: list[str] = []
+    if metrics.ece is not None and metrics.ece > g["max_ece"]:
+        failures.append(f"holdout ece {metrics.ece:.4f} > {g['max_ece']}")
+    if metrics.brier_score is not None and metrics.brier_score > g["max_brier_score"]:
+        failures.append(f"holdout brier_score {metrics.brier_score:.4f} > {g['max_brier_score']}")
+    fmr = metrics.fmr_at_operating_point
+    if fmr is not None and fmr > g["max_fmr_at_operating_point"]:
+        failures.append(f"holdout fmr {fmr:.4f} > {g['max_fmr_at_operating_point']}")
+    if open_set_fmr is None:
+        failures.append("open-set fmr unmeasured: label not-enrolled visitors into the holdout")
+    elif open_set_fmr > g["max_fmr_at_operating_point"]:
+        failures.append(f"open-set fmr {open_set_fmr:.4f} > {g['max_fmr_at_operating_point']}")
+    if not covered:
+        failures.append(
+            f"no identity has {int(g['min_holdout_genuine_per_identity'])} holdout genuine faces"
+        )
+    if len(fit_identities) < g["min_fit_identities"]:
+        failures.append(f"fit identities {len(fit_identities)} < {int(g['min_fit_identities'])}")
+
+    report |= {
+        "features": list(features),
+        "holdout": metrics.model_dump(),
+        "open_set_fmr": open_set_fmr,
+        "holdout_genuine_by_identity": genuine_by_identity,
+        "covered_identities": covered,
+        "reliability": reliability_bins(holdout_probs, holdout_labels),
+        "fit_identities": sorted(fit_identities),
+    }
+    if failures:
+        return FitV2Result(None, failures, [], report)
+
+    def _counts(part: Sequence[ScoreRecord]) -> tuple[int, int, int]:
+        positives = sum(r.label for r in part)
+        return len(part), positives, len(part) - positives
+
+    fit_n, fit_pos, fit_neg = _counts(split.fit)
+    val_n, val_pos, val_neg = _counts(split.val)
+    test_n, test_pos, test_neg = _counts(holdout)
+    artifact = CalibrationArtifactV2(
+        artifact_version=str(uuid.uuid4()),
+        method="logistic_v2",
+        arcface_model_version=str(meta["arcface_model_version"]),
+        model_profile=model_profile,
+        preprocessing_version=str(meta["preprocessing_version"]),
+        fitted_at=datetime.now(UTC),
+        random_seed=random_seed,
+        tool_version=tool_version,
+        fit_dataset_hash=_hash_records(split.fit),
+        val_dataset_hash=_hash_records(split.val),
+        test_dataset_hash=_hash_records(holdout),
+        split_counts=SplitCounts(
+            fit_pairs=fit_n,
+            fit_positives=fit_pos,
+            fit_negatives=fit_neg,
+            val_pairs=val_n,
+            val_positives=val_pos,
+            val_negatives=val_neg,
+            test_pairs=test_n,
+            test_positives=test_pos,
+            test_negatives=test_neg,
+            fit_identities=len(fit_identities),
+        ),
+        metrics=metrics,
+        profile="single_frame",
+        quality_version=str(meta["quality_version"]),
+        features=list(features),
+        coefficients=coefficients,
+        intercept=intercept,
+        covered_identities=covered,
+        fit_basis="pooled" if has_external else "household_only",
+        capture_profile={k: float(v) for k, v in dict(meta.get("capture_profile", {})).items()},
+        household_holdout_metrics=metrics,
+        open_set_fmr_at_operating_point=open_set_fmr,
+        external_datasets=[ExternalDatasetRef(**ref) for ref in meta.get("external_datasets", [])],
+    )
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+    return FitV2Result(artifact, [], [], report)

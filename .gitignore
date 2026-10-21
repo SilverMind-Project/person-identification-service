@@ -11,3 +11,9 @@ build/
 .claude/projects/
 .qwen/
 .kiro/
+
+# Calibration: private household data (captured faces, manifests, fitted artifacts).
+/calibration/
+*.manifest.jsonl
+manifest*.jsonl
+manifest*.meta.json

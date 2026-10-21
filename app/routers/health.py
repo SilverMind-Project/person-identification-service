@@ -44,6 +44,9 @@ async def health(request: Request):
             "artifact_version": evaluator.artifact_version(),
             "arcface_model_version": evaluator.arcface_model_version(),
             "preprocessing_version": evaluator.preprocessing_version(),
+            "profile": evaluator.calibration_profile(),
+            "quality_version": evaluator.quality_version(),
+            "covered_identities": evaluator.covered_identities(),
         },
     }
 

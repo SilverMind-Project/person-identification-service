@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, computed_field
+from datetime import datetime
+
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 
 class FaceQualityModel(BaseModel):
@@ -74,6 +76,13 @@ class FaceDetection(BaseModel):
         description="ready | degraded_missing | degraded_incompatible | degraded_invalid",
     )
     calibration_artifact_version: str | None = Field(default=None)
+    calibration_profile: str = Field(
+        default="",
+        description=(
+            "Profile of the calibration that produced calibrated_confidence: single_frame for "
+            "this endpoint's per-face calibration; empty when no artifact is loaded"
+        ),
+    )
     arcface_model_version: str = Field(default="")
     model_profile: str = Field(default="")
     preprocessing_version: str = Field(default="")
@@ -85,8 +94,36 @@ class FaceDetection(BaseModel):
         return self.similarity
 
 
+class CaptureContext(BaseModel):
+    """Where and how the caller produced the image; sent by tracking-orchestrator.
+
+    When present and ``calibration_capture.enabled`` is on, faces from this call may be kept as
+    calibration candidates (aligned crop, embedding, quality) for operator labeling.
+    """
+
+    camera_id: str = Field(..., min_length=1, max_length=128)
+    captured_at: datetime = Field(..., description="Frame capture time (timezone-aware)")
+    crop_pad_top_frac: float = Field(..., ge=0.0, le=1.0)
+    crop_pad_side_frac: float = Field(..., ge=0.0, le=1.0)
+    crop_jpeg_quality: int = Field(..., ge=1, le=100)
+
+    @field_validator("captured_at")
+    @classmethod
+    def _aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("captured_at must be timezone-aware")
+        return value
+
+
 class IdentifyRequest(BaseModel):
     image: str = Field(..., description="Base64-encoded image")
+    capture_context: CaptureContext | None = Field(
+        default=None,
+        description=(
+            "Capture provenance. Side effect: with calibration capture enabled, faces from this "
+            "call may be stored as calibration candidates."
+        ),
+    )
     include_annotated_image: bool = Field(
         default=False, description="Return image with bounding boxes and labels drawn"
     )

@@ -108,6 +108,8 @@ All settings in `config/settings.yaml` with `${ENV_VAR:default}` interpolation. 
 | `minio.access_key` | `MINIO_ACCESS_KEY` | `minioadmin` | MinIO access key |
 | `minio.secret_key` | `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
 | `minio.bucket` | `MINIO_BUCKET` | `cognitive-companion` | S3 bucket name |
+| `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Fitted calibration artifact; empty means no calibrated confidence |
+| `calibration_capture.enabled` | -- | `false` | Sample tracker faces for calibration labeling |
 | `logging.level` | `LOG_LEVEL` | `INFO` | Log verbosity |
 
 Additional tuning options (edit `config/settings.yaml` directly):
@@ -137,8 +139,44 @@ Application endpoints use `/api/v1`. The health endpoint is at `/health`.
 | `POST` | `/identify` | Identify faces in a single image |
 | `POST` | `/identify-batch` | Batch identify + motion detection |
 | `POST` | `/detect-motion` | Standalone motion direction detection |
+| `GET` | `/calibration/candidates` | Calibration captures awaiting or holding a label |
+| `POST` | `/calibration/candidates/{candidate_id}/label` | Label a capture (member, not enrolled, not a face) |
+| `POST` | `/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable |
+| `DELETE` | `/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
+| `GET` | `/calibration/summary` | Labeling progress toward the fit gates |
 
 Full reference: [silvermind-project.github.io/api/reference](https://silvermind-project.github.io/api/reference).
+
+## Calibrating on your cameras
+
+Raw ArcFace similarity is not a probability, and how it behaves depends on your cameras. The
+service turns it into `calibrated_confidence` only with an artifact fitted on faces from your own
+household. Until then `calibrated_confidence` is `null` and nothing treats a face as authoritative.
+
+1. Enroll every resident first, and wait until the gallery is stable. Captures taken before a
+   resident is enrolled cannot become genuine examples for them.
+2. Set `calibration_capture.enabled: true` (person-id `config/settings.yaml`) for 7 to 14 days.
+   Faces from the tracker's identify calls are sampled per quality level, resident, and camera.
+3. Label captures in Cognitive Companion under People, Face Calibration: a number key per
+   resident, `n` for someone who is not enrolled (visitors and relatives matter most), `x` for not
+   a face. The progress panel shows labeled faces and walks per resident against the target.
+4. Build the score manifest (read-only; keep the files outside the repository):
+   `DATABASE_URL=... uv run --extra calibration-tools python -m app.calibration.cli build-manifest --output manifest.jsonl`
+   Add `--external set.jsonl` to pool a research face set (a `set.jsonl.licence.json` sidecar with
+   `name`, `version`, and `licence` is required; images run through this service's face engine).
+5. Fit: `uv run --extra calibration-tools python -m app.calibration.cli fit-v2 --manifest manifest.jsonl --output artifact.json`
+   plus `--allow-household-only` when no external set is used. The fit is gated on a holdout of
+   your own household's walks; if a gate fails, the report says why (usually too few low-quality
+   genuine faces for a resident, or too few visitors labeled) and capture continues.
+6. Validate: `uv run --extra calibration-tools python -m app.calibration.cli validate --artifact artifact.json --quality-version heuristic-v1`
+   (the active scorer; the output lists the covered identities).
+7. Mount it read-only (docker compose: copy to `./calibration/artifact.json`; Kubernetes: create the
+   `person-id-calibration` secret) and set `CALIBRATION_ARTIFACT_PATH=/app/calibration/artifact.json`,
+   then restart.
+8. Confirm `/health` reports calibration `ready` with the artifact version and the covered
+   identities. Residents not covered, and anyone enrolled later, get no calibrated confidence
+   until you recalibrate.
+9. Turn capture off, or leave it on with a lower `per_bucket_per_day` to watch for drift.
 
 ### Enroll a member
 
