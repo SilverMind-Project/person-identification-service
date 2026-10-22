@@ -54,6 +54,25 @@ docker compose up -d
 
 ---
 
+## Claude Code guardrails
+
+Start sessions in this directory (or `/cd` here): `.claude/settings.json` applies only from the
+session's working directory. It sets `UV_FROZEN=1` and runs four hooks from `.claude/hooks/`:
+
+- **Guard:** blocks any `pytest` run without `TEST_DATABASE_URL` naming a `*_test` database,
+  because it would silently skip every database test. `make check` and `make test` are allowed,
+  since they read the variable from the environment.
+- **Post-edit:** an em-dash in an edited `.md` file or a `ruff check` failure comes back as
+  feedback.
+- **Stop:** flags added em-dashes and `uv.lock` churn. It blocks once and never loops.
+- **Session start:** the gate command, the test database URL, and the live write-counter check.
+
+Machine-wide guards (including write SQL against the live databases) live in `~/.claude/`. Run
+any blocked command yourself with `!` if it is intended. `make hooks-test` is part of
+`make check`.
+
+---
+
 ## Architecture
 
 ```text
