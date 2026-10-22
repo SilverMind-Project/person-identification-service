@@ -122,16 +122,17 @@ uv run --extra calibration-tools python -m app.calibration.cli validate --artifa
 uv run --extra calibration-tools python -m app.calibration.cli build-manifest --output manifest.jsonl
 uv run --extra calibration-tools python -m app.calibration.cli fit-v2 --manifest manifest.jsonl --output artifact.json --allow-household-only
 
-# Code quality
-uv run ruff check .              # Lint
-uv run ruff format .             # Format
-uv run mypy app/                 # Type check
-
-# Tests. Database tests run only against a database whose name ends in _test, and skip
-# without TEST_DATABASE_URL; they never read DATABASE_URL (their teardown deletes rows).
+# Quality gate: `make check` runs ruff check, ruff format --check, mypy app/, and the full
+# suite with the dev and calibration-tools extras (uv run --frozen, so uv.lock never churns).
+# Database tests run only against a database whose name ends in _test, and skip without
+# TEST_DATABASE_URL; they never read DATABASE_URL (their teardown deletes rows).
+# PID_REQUIRE_FULL_SUITE=1 (set in CI, .github/workflows/ci.yml) turns any skip into a failure.
 export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
-uv run pytest                    # Full suite
-uv run pytest tests/test_enrollment_store.py -v   # Targeted
+make check
+PID_REQUIRE_FULL_SUITE=1 make check
+make audit                       # pip-audit over the locked dependencies
+uv run --frozen ruff format .    # Format (writes)
+uv run --frozen --extra dev pytest tests/test_enrollment_store.py -v   # Targeted
 
 # Migrations (startup applies pending ones; these are for operators)
 uv run python -m app.db.migrate status
@@ -507,7 +508,7 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`; calibration fixtures under `tests/fixtures/identity_integrity/`.
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
 
 ### Fixtures
 

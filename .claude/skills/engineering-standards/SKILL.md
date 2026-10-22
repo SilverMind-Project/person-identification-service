@@ -133,13 +133,15 @@ its default. Comments never cite milestone or decision numbers.
 ## Quality gate
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy app/
-uv run pytest
+export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
+PID_REQUIRE_FULL_SUITE=1 make check
 ```
 
-All four must pass before a PR is declared done.
+`make check` runs `ruff check`, `ruff format --check`, `mypy app/`, and the full suite with the
+`dev` and `calibration-tools` extras. With `PID_REQUIRE_FULL_SUITE=1` (what CI sets) any skipped
+test fails the run (`tests/skip_guard.py`), so a missing test database or extra cannot pass as
+green. It must pass before a PR is declared done. `make audit` reports advisories in the locked
+dependencies (non-blocking in CI until the dependency-upgrade follow-up lands).
 
 ## Review checklist
 

@@ -1,0 +1,78 @@
+name: CI
+
+# Runs `make check` (ruff, ruff format check, mypy, the full pytest suite) against a disposable
+# TimescaleDB service database. The database name ends in _test because tests/db.py refuses
+# any other; PID_REQUIRE_FULL_SUITE=1 fails the run on any skipped test, so a missing database
+# or a missing calibration-tools extra cannot pass as green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Quality gate (make check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: timescale/timescaledb-ha:pg18
+        env:
+          POSTGRES_USER: pid_user
+          POSTGRES_PASSWORD: ci-pid-password
+          POSTGRES_DB: person_identification_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pid_user -d person_identification_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://pid_user:ci-pid-password@localhost:5432/person_identification_test
+      PID_REQUIRE_FULL_SUITE: "1"
+    steps:
+      # No LFS: no test reads data/models/buffalo_l.zip (tests use fake engines), so the
+      # model archive is not downloaded.
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen --extra dev --extra calibration-tools
+
+      # Production databases get these extensions from ../db/db/init-databases.sh before the
+      # service ever connects; the pool registers the pgvector codec on every connection, so
+      # a database without the extension fails before migrations run. Provision the test
+      # database the same way.
+      - name: Provision test database extensions (as production init does)
+        env:
+          PGPASSWORD: ci-pid-password
+        run: >-
+          psql -h localhost -U pid_user -d person_identification_test -v ON_ERROR_STOP=1
+          -c "CREATE EXTENSION IF NOT EXISTS vector CASCADE;"
+          -c "CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;"
+          -c "CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"
+
+      - name: Quality gate
+        run: make check
+
+      # Reports advisories in the locked dependencies. Non-blocking until the dependency
+      # upgrade follow-up lands (the lock carried open advisories on 2026-10-21); make it
+      # blocking by deleting continue-on-error once `make audit` is clean.
+      - name: Dependency audit (locked dependencies)
+        continue-on-error: true
+        run: make audit

@@ -26,18 +26,15 @@ uv sync
 # Offline model conversion tools
 uv sync --extra model-tools
 
-# Lint
-uv run ruff check .
-
-# Format
-uv run ruff format .
-
-# Type check
-uv run mypy app/
-
-# Tests (database tests need a *_test database and skip without one; never the service DB)
+# Quality gate (lint, format check, mypy, full tests). Database tests need a *_test database
+# and skip without one; never the service DB. PID_REQUIRE_FULL_SUITE=1 (CI) fails any skip.
 export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
-uv run pytest
+make check
+PID_REQUIRE_FULL_SUITE=1 make check   # what CI runs: a skipped test fails the gate
+make audit                            # pip-audit over the locked dependencies
+
+# Format (writes)
+uv run --frozen ruff format .
 
 # Migrations (operators; startup applies pending ones)
 uv run python -m app.db.migrate status
