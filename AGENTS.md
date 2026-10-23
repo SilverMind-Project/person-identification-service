@@ -27,14 +27,16 @@ Two characteristics make this service non-trivial:
 
 | Layer | Choice |
 | --- | --- |
-| Backend | Python 3.12, FastAPI, Pydantic 2, stdlib `logging` |
+| Backend | Python 3.12, FastAPI, Pydantic 2 for wire models (dataclasses such as `DetectedFace`, `IdentifyResult`, `PersonTrackResult` for internal data), stdlib `logging` |
 | Database | PostgreSQL with TimescaleDB + pgvector extensions; asyncpg driver with `pgvector` package for vector codec |
 | Object storage | MinIO (S3-compatible) via `boto3` |
 | Face AI | Buffalo_L: SCRFD, ArcFace, 2D/3D landmarks, gender/age |
 | Inference runtime | NVIDIA Triton Inference Server over gRPC |
 | Image processing | OpenCV (`opencv-python-headless`) |
 | Package manager | `uv` (`uv.lock` is committed) |
-| Lint and types | `ruff`; `mypy` gradual typing |
+| Lint and types | `ruff` (`E`, `F`, `I`, `W`, `UP`, `B`, `SIM`, `RUF`, `PIE`, `PT`, `C4`, `T20`; 100-char lines); `mypy` gradual typing over `app/` |
+
+**Logging is stdlib `logging.getLogger(__name__)` with `key=value` text, by design.** cognitive-companion uses its own `backend.core.logging` wrapper and continuous-tracking uses `structlog`; each choice is per project. Do not "fix" this service to match another repository.
 
 ---
 
@@ -62,7 +64,7 @@ person-identification-service/
 │   │   ├── visitor.py       # Visitor cluster list/detail/name envelopes
 │   │   └── calibration_review.py # Calibration candidate list, label, and summary envelopes
 │   ├── observability/
-│   │   └── metrics.py       # Prometheus metrics (interocular and quality histograms, visitor counters)
+│   │   └── metrics.py       # Prometheus metrics (pid_face_interocular_px, pid_face_quality_score, visitor counters)
 │   ├── routers/
 │   │   ├── health.py        # GET /health, GET /metrics (no /api/v1 prefix)
 │   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
@@ -75,7 +77,9 @@ person-identification-service/
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
 │       ├── face_geometry.py   # Face box size and interocular distance (pure)
 │       ├── face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
-│       ├── enrollment_store.py # pgvector gallery: enroll, identify, remove
+│       ├── enrollment_store.py # Orchestration: enroll(), identify(), identify_all(), members (no SQL, no config)
+│       ├── enrollment_repository.py # EnrollmentRepository protocol + Postgres and in-memory peers
+│       ├── match_policy.py    # classify_match: nearest centroids to recognition state (pure)
 │       ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
 │       ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
 │       ├── calibration_candidates.py # Calibration capture repository (Postgres + in-memory peers)
@@ -86,6 +90,9 @@ person-identification-service/
 │       └── image_annotator.py # Bounding box + label drawing
 ├── config/
 │   └── settings.yaml        # All application settings
+├── scripts/
+│   ├── calibrate_face_quality.py # Offline: suggest face quality ramp anchors from labeled images
+│   └── check-no-em-dash.sh  # Markdown em-dash gate (make check-md)
 ├── schemas/
 │   └── calibration_artifact.schema.json
 ├── migrations/
@@ -140,7 +147,7 @@ uv run python -m app.db.migrate rollback --steps 1
 
 # Docker
 docker build -t person-id-service .
-docker run --gpus all -p 8200:8200 -v $(pwd)/data:/app/data person-id-service
+docker run -p 8200:8200 -e TRITON_GRPC_URL=triton:8701 person-id-service
 docker compose up -d
 ```
 
@@ -189,12 +196,12 @@ Camera frame (base64)
 
 In `app.main` lifespan (order matters):
 
-1. `logging.basicConfig()` from config
+1. `logging.basicConfig()` from `logging.level`; build the face quality scorer from `face_quality` (an unknown scorer fails startup here, before any connection)
 2. `_init_pool(dsn)`: asyncpg pool with the `pgvector` codec registered (`min_size=1, max_size=5`)
 3. `run_migrations(pool)`: applies pending `migrations/*.up.sql` files transactionally
 4. `create_minio_client()`: MinIO client with bucket ensured
 5. Open `TritonGrpcClient`, build `FaceEngine`, and require all five configured models to be ready
-6. `EnrollmentStore(pool, face_engine)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
+6. `EnrollmentStore(PostgresEnrollmentRepository(pool), face_engine, MatchThresholds(...))` (thresholds from `recognition.*`), `MotionDetector()`, `GuestImageStore(pool, minio_client)`
 7. `VisitorStore(pool, minio_client)`, `CalibrationCaptureService` (started; seeds today's caps and runs its worker only when `calibration_capture.enabled`), plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters and expired calibration captures)
 8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, preprocessing, and quality scorer versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure
 9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_candidates`, `calibration_capture`, `calibration_evaluator`
@@ -206,12 +213,40 @@ In `app.main` lifespan (order matters):
 
 ```python
 from app.config import config
+model = config.get("face_engine.model_name")  # "buffalo_l"
 threshold = config.get("recognition.threshold", 0.4)
 ```
 
 Dot-notation keys map to nested dict paths. `config.reload()` clears the cache and re-reads the file (used only in tests; in production, restart the process).
 
 All secrets (database DSN, MinIO credentials) come from environment variables. The config file contains only non-sensitive defaults.
+
+Key settings:
+
+| Setting | Env var | Default | Description |
+| --- | --- | --- | --- |
+| `face_engine.triton_url` | `TRITON_GRPC_URL` | `triton:8701` | Triton gRPC endpoint |
+| `face_engine.model_profile` | `PERSON_ID_MODEL_PROFILE` | `full` | Health metadata |
+| `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Request timeout |
+| `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
+| `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
+| `recognition.unknown_threshold` | -- | `0.25` | Lower bound of the `candidate` band; below is `unrecognized` |
+| `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON (schema 1 or 2); empty means `degraded_missing`. Schema 2 binds to the quality scorer version and covers only its listed identities |
+| `face_quality.scorer` | -- | `heuristic-v1` | Face quality scorer; unknown names fail startup |
+| `face_quality.heuristic.*` | -- | see settings | Ramp anchors and geometric-mean weights; a change is a new scorer version |
+| `calibration_capture.enabled` | -- | `false` | Sample faces from tracker `/identify` calls into the calibration set |
+| `calibration_capture.per_bucket_per_day` | -- | `40` | Cap per (quality decile, nearest identity, camera) per UTC day |
+| `calibration_capture.unlabeled_retention_days` | -- | `30` | Unlabeled and rejected captures (and crops) purged after this |
+| `calibration_capture.queue_size` | -- | `64` | Background capture queue; a full queue drops the offer |
+| `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
+| `motion.min_displacement_fraction` | -- | `0.05` | Min displacement for movement |
+| `motion.cross_frame_similarity` | -- | `0.5` | Unknown-face cross-frame linking |
+| `database.dsn` | `DATABASE_URL` | -- | PostgreSQL connection string (required) |
+| `minio.endpoint` | `MINIO_ENDPOINT` | `localhost:9000` | MinIO/S3 endpoint |
+| `minio.access_key` | `MINIO_ACCESS_KEY` | `minioadmin` | MinIO access key |
+| `minio.secret_key` | `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
+| `minio.bucket` | `MINIO_BUCKET` | `cognitive-companion` | S3 bucket name |
+| `minio.secure` | -- | `false` | Use HTTPS |
 
 ---
 
@@ -232,7 +267,8 @@ similarity: float = FaceEngine.compute_similarity(emb1, emb2)  # static
 - `det_size: [640, 640]` is required by the SCRFD Triton contract
 - `det_threshold: 0.6` -- filters low-confidence detections
 - Returns `DetectedFace` with bounding box, normalized embedding, landmarks, pose, and attributes
-- SCRFD decode/NMS and ArcFace alignment remain client-side and are unit-tested
+- SCRFD decode/NMS and ArcFace alignment remain client-side and are unit-tested; alignment runs once per face and the quality score is computed on the aligned crop
+- `align_face(image, keypoints)` is a module function returning the 112x112 aligned BGR crop (also used by `scripts/calibrate_face_quality.py`)
 - `compute_similarity` is `np.dot(emb1, emb2)` (valid because embeddings are normalized)
 
 ### 6.2 EnrollmentStore (`app/services/enrollment_store.py`)
@@ -254,6 +290,8 @@ Orchestrates enrollment and identification. It holds no SQL and reads no configu
 2. For each image: await `engine.detect_faces()`, then pick the largest face by bbox area
 3. `upsert_member` (reports "enrolled" or "updated"), `insert_embeddings`, `recompute_centroid`
    (mean of all the member's embeddings, L2-normalized, upserted into `centroids`)
+
+**Members:** `list_members()` (with embedding counts), `remove_member(person_id)` (CASCADE removes embeddings and centroid), and `member_count()`.
 
 **Identify flow:** `nearest_centroids(embedding, k=1)` (pgvector `<=>` cosine distance, DiskANN
 index on `centroids.centroid`), then `classify_match`.
@@ -299,6 +337,8 @@ boto3 S3 client configured for MinIO compatibility:
 - Signature version s3v4
 - HTTP or HTTPS depending on `minio.secure` setting
 - `endpoint` is host:port only (scheme added by the client)
+- `upload_bytes(data, object_name, content_type) -> str` uploads via `BytesIO` and returns a presigned URL; `generate_presigned_url(object_name, expiration=3600)`; `delete_object(object_name)`
+- Factory: `create_minio_client()` reads the MinIO settings, creates the client, and ensures the bucket exists
 
 ### 6.6 Image Annotator (`app/services/image_annotator.py`)
 
@@ -310,7 +350,7 @@ Draws bounding boxes and labels on a copy of the input image:
 
 ### 6.7 VisitorStore (`app/services/visitor_store.py`)
 
-Manages the visitor clustering subsystem (M06) for recurring unknown visitors.
+Manages the visitor clustering subsystem for recurring unknown visitors.
 
 **Tables:**
 - `visitor_clusters`: tracks `cluster_id`, `status` (`candidate`, `surfaced`, `named`, `dismissed`), `distinct_days`, and the running-mean centroid.
@@ -333,6 +373,10 @@ An async daily task deletes unnamed (`candidate`/`surfaced`/`dismissed`) cluster
 
 **Naming is privileged:**
 The API exposes `/api/v1/visitors/clusters/{id}/name`. Naming is the single privileged transition: it moves biometric data from the visitor dataset into the enrollment dataset. Enrollment gains entries ONLY via explicit enroll calls or explicit operator naming of a visitor cluster; never automatically.
+
+### 6.8 CalibrationEvaluator (`app/calibration/evaluator.py`)
+
+Maps raw similarity to `calibrated_confidence` from a versioned JSON artifact. Missing, invalid, or incompatible artifacts give `calibrated_confidence = null` and a degraded `/health` calibration status; it never falls back to raw similarity. The contract is the face-confidence-calibration skill.
 
 ---
 
@@ -420,7 +464,7 @@ Standalone motion detection without enrollment lookups. Includes full trajectory
 
 ## 8. Database schema
 
-`migrations/0001_initial_schema.up.sql` is the frozen baseline. It creates the tables below plus the visitor clustering tables `visitor_clusters` and `visitor_sightings` (hypertable on `seen_at`). Migrations are incremental from 2026-10-20: every change is a new `NNNN_description.up.sql` with a matching `.down.sql`; never edit `0001` and never drop the database to apply a change.
+PostgreSQL (TimescaleDB + pgvector) is the instance shared with the other Cognitive Companion services. `migrations/0001_initial_schema.up.sql` is the frozen baseline. It creates the tables below plus the visitor clustering tables `visitor_clusters` and `visitor_sightings` (hypertable on `seen_at`). Migrations are incremental from 2026-10-20: every change is a new `NNNN_description.up.sql` with a matching `.down.sql`; never edit `0001` and never drop the database to apply a change.
 
 Core tables:
 
@@ -460,6 +504,16 @@ CREATE TABLE guest_visits (
 );
 SELECT create_hypertable('guest_visits', 'created_at');
 ```
+
+Tables added on top of the core tables:
+
+| Table | Type | Purpose |
+| --- | --- | --- |
+| `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed) and running centroid |
+| `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
+| `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003) |
+
+List every migration with `ls migrations`.
 
 Key design decisions:
 - `embeddings` and `guest_visits` are TimescaleDB hypertables for automatic time-based partitioning.
@@ -558,7 +612,7 @@ async def pool():
 
 ### 10.3 Add a database migration
 
-1. Create a new SQL file in `migrations/` with the next sequence number (e.g., `0002_your_change.up.sql`) and a matching `0002_your_change.down.sql` that exactly reverses it.
+1. Create a new SQL file in `migrations/` with the next sequence number (e.g., `NNNN_your_change.up.sql`) and a matching `NNNN_your_change.down.sql` that exactly reverses it.
 2. Write idempotent DDL (use `IF NOT EXISTS`, `IF EXISTS` where appropriate).
 3. The migration runs automatically at next startup via the lifespan. Never edit `0001_initial_schema` and never drop the database to apply a change: enrollment and visitor data are irreplaceable.
 
@@ -579,6 +633,8 @@ async def pool():
 | MinIO (S3-compatible) | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | Required | Guest image object storage |
 | Triton Inference Server | `TRITON_GRPC_URL` | Required | Buffalo_L model execution |
 
+Runtime ONNX and TensorRT artifacts live in the continuous-tracking Triton repositories; the service container holds no model weights. Face embeddings and centroids are stored in PostgreSQL; guest images in MinIO.
+
 This service does not call other Cognitive Companion microservices. It is called BY the Cognitive Companion backend (as the BFF for person identification).
 
 ---
@@ -591,6 +647,8 @@ This service does not call other Cognitive Companion microservices. It is called
 
 **Architecture and layering.**
 - Do not instantiate services in routers. Read from `request.app.state`.
+- Do not use bare `except:`. Log and return a zero value, or re-raise as an HTTP exception.
+- Follow existing patterns; no premature abstractions.
 - Do not add a local inference path or silently skip an unavailable model.
 - Do not store embeddings in local `.npy` files. Use the pgvector `embeddings` and `centroids` tables.
 - Do not save guest images to the local filesystem. Use MinIO via `GuestImageStore`.
@@ -624,7 +682,7 @@ This service does not call other Cognitive Companion microservices. It is called
 | Understand startup wiring | `app/main.py` (lifespan) |
 | Debug face detection | `app/services/face_engine.py` |
 | Debug identification accuracy | `app/services/enrollment_store.py` (thresholds, centroid query) |
-| Measure face resolution | `app/services/face_geometry.py`; per-camera reports come from continuous-tracking `scripts/face_resolution_report.py` |
+| Measure face resolution | `app/services/face_geometry.py`; per-camera reports come from `continuous-tracking/tracking-orchestrator/scripts/face_resolution_report.py` |
 | Debug calibration state | `app/calibration/evaluator.py`, `GET /health` (`calibration` block) |
 | Debug visitor clustering | `app/services/visitor_store.py` |
 | Debug motion detection | `app/services/motion_detector.py` (_classify_direction) |

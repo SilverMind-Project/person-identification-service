@@ -50,8 +50,8 @@ Rules:
 
 - Responses are additive-only. A new field gets a default so older callers keep working; a
   removed field goes through a deprecation window recorded in this skill, with every consumer
-  (tracking-orchestrator `app/inference/face_id_client.py`, cognitive-companion
-  `backend/integrations/person_id_client.py`) migrated in the same change set.
+  (`continuous-tracking/tracking-orchestrator/app/inference/face_id_client.py`,
+  `cognitive-companion/backend/integrations/person_id_client.py`) migrated in the same change set.
 - Name every similarity `similarity` or `raw_similarity`. Never name cosine similarity
   `confidence`, `probability`, or `certainty`. The face `confidence` field was removed on
   2026-10-20. Deprecation window open: `raw_similarity` is a computed alias of `similarity`, kept
@@ -97,7 +97,9 @@ its default. Comments never cite milestone or decision numbers.
 
 ## Logging, metrics, privacy
 
-- stdlib `logging.getLogger(__name__)` with `key=value` message fields. Never `print`.
+- stdlib `logging.getLogger(__name__)` with `key=value` message fields. Never `print`. This is a
+  deliberate per-project choice: cognitive-companion uses `backend.core.logging` and
+  continuous-tracking uses `structlog`. Do not convert this service to match them.
 - Never log base64 images, embeddings, member names, or crop bytes.
 - Prometheus metrics use the default registry and are exposed at `/metrics`. Label values must
   be bounded (states, reasons), never person ids.
@@ -138,7 +140,8 @@ PID_REQUIRE_FULL_SUITE=1 make check
 ```
 
 `make check` runs `ruff check`, `ruff format --check`, `mypy app/`, and the full suite with the
-`dev` and `calibration-tools` extras. With `PID_REQUIRE_FULL_SUITE=1` (what CI sets) any skipped
+`dev` and `calibration-tools` extras, then the hook test table, the markdown em-dash check, and
+`make docs-check` (instruction files name only files that exist). With `PID_REQUIRE_FULL_SUITE=1` (what CI sets) any skipped
 test fails the run (`tests/skip_guard.py`), so a missing test database or extra cannot pass as
 green. It must pass before a PR is declared done. `make audit` reports advisories in the locked
 dependencies (non-blocking in CI until the dependency-upgrade follow-up lands).
@@ -150,4 +153,5 @@ dependencies (non-blocking in CI until the dependency-upgrade follow-up lands).
 - [ ] Wire changes are additive, tested, and mirrored in every consumer.
 - [ ] Migration is a new numbered file with a correct down migration.
 - [ ] No biometric data or names in logs; new stored artifacts have retention.
-- [ ] AGENTS.md, CLAUDE.md, and this skill are updated when a rule or contract changed.
+- [ ] AGENTS.md and this skill are updated when a rule or contract changed (CLAUDE.md holds only
+      the gate, database safety, guardrails, invariants, and cross-repo contracts).
