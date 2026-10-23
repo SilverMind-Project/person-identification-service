@@ -13,7 +13,7 @@
 
 UV := uv run --frozen --extra dev --extra calibration-tools
 
-.PHONY: help lint format-check typecheck test check audit hooks-test
+.PHONY: help lint format-check typecheck test check audit hooks-test check-md install-hooks
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -33,7 +33,15 @@ test: ## Full pytest suite
 hooks-test: ## Claude Code hook test table (.claude/hooks/tests/run.sh; needs jq)
 	bash .claude/hooks/tests/run.sh
 
-check: lint format-check typecheck test hooks-test ## The quality gate
+check-md: ## Markdown has no em-dashes (self-test, then every tracked .md)
+	bash scripts/check-no-em-dash.sh --self-test
+	bash scripts/check-no-em-dash.sh
+
+install-hooks: ## Use the versioned git hooks in .githooks/ (also writes the Git LFS hooks there)
+	git config core.hooksPath .githooks
+	git lfs update --force
+
+check: lint format-check typecheck test hooks-test check-md ## The quality gate
 
 # pip-audit must read the locked requirements: a bare `uvx pip-audit` audits the throwaway
 # environment uvx builds for pip-audit itself and always reports clean. triton-shared is a git

@@ -30,6 +30,7 @@ uv sync --extra model-tools
 # and skip without one; never the service DB. PID_REQUIRE_FULL_SUITE=1 (CI) fails any skip.
 export TEST_DATABASE_URL=postgresql://pid_user:...@localhost:5432/person_identification_test
 make check
+make install-hooks   # once per clone: versioned git hooks (.githooks/), em-dash check, Git LFS
 PID_REQUIRE_FULL_SUITE=1 make check   # what CI runs: a skipped test fails the gate
 make audit                            # pip-audit over the locked dependencies
 
