@@ -27,6 +27,7 @@ from app.services.calibration_capture import CaptureContext as CalibrationCaptur
 from app.services.face_engine import decode_base64_image
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
+from app.services.template_aggregation import encode_embedding_f16
 from app.services.visitor_store import VisitorStore
 
 logger = logging.getLogger(__name__)
@@ -94,11 +95,13 @@ def _make_face_detection(
     active_arcface_version: str,
     active_model_profile: str,
     active_preprocessing_version: str,
+    embedding: np.ndarray | None = None,
 ) -> FaceDetection:
     """Build a FaceDetection with calibration fields populated from the evaluator.
 
     calibrated_confidence is set only for recognized faces; degraded states yield None.
     Version fields always carry the active service config so CTS can gate on mismatches.
+    ``embedding`` is set only when the caller asked for it.
     """
     calibrated_confidence: float | None = None
     if r.recognition_state == "recognized":
@@ -137,6 +140,8 @@ def _make_face_detection(
         arcface_model_version=active_arcface_version,
         model_profile=active_model_profile,
         preprocessing_version=active_preprocessing_version,
+        embedding_f16_b64=encode_embedding_f16(embedding) if embedding is not None else None,
+        embedding_model_version=active_arcface_version if embedding is not None else None,
     )
 
 
@@ -158,7 +163,8 @@ async def identify(request: Request, body: IdentifyRequest):
 
     Side effects: unknown faces are recorded as visitor sightings; with calibration capture
     enabled and a ``capture_context`` in the request, a stratified sample of faces is stored as
-    calibration candidates (aligned crop, embedding, quality) for operator labeling.
+    calibration candidates (aligned crop, embedding, quality) for operator labeling. With
+    ``return_embedding`` each face carries its embedding for a later ``/match-template`` call.
     """
     logger.info(
         "POST /identify image_size=%d include_annotated=%s save_guests=%s",
@@ -204,8 +210,9 @@ async def identify(request: Request, body: IdentifyRequest):
                 active_arcface_version,
                 active_model_profile,
                 active_preprocessing_version,
+                embedding=face.embedding if body.return_embedding else None,
             )
-            for r in identities
+            for face, r in zip(faces, identities, strict=True)
         ],
         annotated_image=annotated_b64,
         image_width_px=int(image.shape[1]),

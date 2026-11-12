@@ -6,7 +6,8 @@ app/calibration/fit.py behind the ``calibration-tools`` optional dependency grou
 Health states:
   ready                 -- artifact loaded and validated; predict() can return a probability.
   degraded_missing      -- artifact_path absent or file not found.
-  degraded_incompatible -- artifact versions, quality scorer, or profile do not match the service.
+  degraded_incompatible -- artifact versions, quality scorer, profile, or template aggregator do
+                           not match the service.
   degraded_invalid      -- artifact fails schema or monotonicity validation.
 
 In any degraded state, predict() returns None. Callers must propagate None as
@@ -15,6 +16,10 @@ calibrated_confidence and must not substitute raw similarity.
 Two artifact schemas load. Schema 1 maps raw similarity alone. Schema 2 maps a feature vector
 (similarity plus face-quality features) and covers only the identities listed in the artifact:
 any other identity, including one enrolled after the fit, gets None.
+
+One evaluator serves one calibration profile. The service builds two: ``single_frame`` for
+per-face scores and ``template`` for aggregated templates; an artifact fitted for one profile is
+incompatible with the other, and a template artifact also binds to its aggregator version.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ _VALID_STATES = frozenset(
     {"ready", "degraded_missing", "degraded_incompatible", "degraded_invalid"}
 )
 SINGLE_FRAME_PROFILE = "single_frame"
+TEMPLATE_PROFILE = "template"
 
 Artifact = CalibrationArtifact | CalibrationArtifactV2
 
@@ -75,11 +81,15 @@ class CalibrationEvaluator:
         expected_model_profile: str = "",
         expected_preprocessing_version: str = "",
         expected_quality_version: str = "",
+        expected_calibration_profile: str = SINGLE_FRAME_PROFILE,
+        expected_aggregation: str | None = None,
     ) -> CalibrationEvaluator:
         """Load a calibration artifact from disk, returning a degraded evaluator on any failure.
 
         ``expected_quality_version`` is the active face-quality scorer's version; a schema 2
-        artifact fitted on another scorer's scores is incompatible.
+        artifact fitted on another scorer's scores is incompatible. ``expected_calibration_profile``
+        is the profile this evaluator serves (schema 1 artifacts are single-frame), and
+        ``expected_aggregation`` the live template aggregator's version (None for single-frame).
         """
         if not artifact_path:
             logger.warning("calibration_artifact_missing reason=no_path_configured")
@@ -108,6 +118,8 @@ class CalibrationEvaluator:
             model_profile=expected_model_profile,
             preprocessing_version=expected_preprocessing_version,
             quality_version=expected_quality_version,
+            calibration_profile=expected_calibration_profile,
+            aggregation=expected_aggregation,
         )
         if mismatch is not None:
             logger.warning("calibration_artifact_incompatible field=%s", mismatch)
@@ -172,7 +184,7 @@ class CalibrationEvaluator:
         return self._artifact.preprocessing_version if self._artifact else ""
 
     def calibration_profile(self) -> str:
-        """``single_frame`` for a loaded artifact (schema 1 is single-frame), else ``""``."""
+        """The loaded artifact's profile (schema 1 is single-frame), else ``""``."""
         if self._artifact is None:
             return ""
         if isinstance(self._artifact, CalibrationArtifactV2):
@@ -183,6 +195,12 @@ class CalibrationEvaluator:
         if isinstance(self._artifact, CalibrationArtifactV2):
             return self._artifact.quality_version
         return ""
+
+    def aggregation(self) -> str | None:
+        """The template aggregator a template artifact was fitted with; None otherwise."""
+        if isinstance(self._artifact, CalibrationArtifactV2):
+            return self._artifact.aggregation
+        return None
 
     def covered_identities(self) -> list[str] | None:
         """Identities a schema 2 artifact covers; None for schema 1 (no per-identity coverage)."""
@@ -203,6 +221,8 @@ def _first_mismatch(
     model_profile: str,
     preprocessing_version: str,
     quality_version: str,
+    calibration_profile: str,
+    aggregation: str | None,
 ) -> str | None:
     if arcface_model_version and artifact.arcface_model_version != arcface_model_version:
         return "arcface_model_version"
@@ -211,10 +231,15 @@ def _first_mismatch(
     if preprocessing_version and artifact.preprocessing_version != preprocessing_version:
         return "preprocessing_version"
     if isinstance(artifact, CalibrationArtifactV2):
-        if artifact.profile != SINGLE_FRAME_PROFILE:
+        if artifact.profile != calibration_profile:
             return "profile"
         if quality_version and artifact.quality_version != quality_version:
             return "quality_version"
+        if artifact.aggregation != aggregation:
+            return "aggregation"
+    elif calibration_profile != SINGLE_FRAME_PROFILE:
+        # Schema 1 maps single-face similarity; it never calibrates a template.
+        return "profile"
     return None
 
 

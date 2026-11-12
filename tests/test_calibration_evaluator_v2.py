@@ -144,3 +144,52 @@ def test_published_v2_json_schema_matches_the_model() -> None:
     expected["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     expected["$id"] = "calibration_artifact_v2.schema.json"
     assert published == expected, "regenerate schemas/calibration_artifact_v2.schema.json"
+
+
+# --- template profile ----------------------------------------------------------------------------
+
+_TEMPLATE = _V2 | {"profile": "template", "aggregation": "qwmean-v1"}
+
+
+def _load_template(
+    tmp_path: Path, artifact: dict[str, Any], aggregation: str | None
+) -> CalibrationEvaluator:
+    path = tmp_path / "template.json"
+    path.write_text(json.dumps(artifact))
+    return CalibrationEvaluator.from_artifact_path(
+        path,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_quality_version="heuristic-v1",
+        expected_calibration_profile="template",
+        expected_aggregation=aggregation,
+    )
+
+
+def test_template_artifact_loads_for_the_template_profile(tmp_path: Path) -> None:
+    ev = _load_template(tmp_path, _TEMPLATE, "qwmean-v1")
+    assert ev.health() == "ready"
+    assert (ev.calibration_profile(), ev.aggregation()) == ("template", "qwmean-v1")
+    assert ev.predict(_FEATURES, "resident-alpha") is not None
+
+
+@pytest.mark.parametrize(
+    ("artifact", "aggregation"),
+    [
+        (_V2, "qwmean-v1"),  # a single-frame artifact is never applied to a template score
+        (_V1, "qwmean-v1"),  # nor is a schema 1 (single-face) artifact
+        (_TEMPLATE, "caface-v1"),  # a template fitted with another aggregator
+        (_TEMPLATE | {"aggregation": None}, "qwmean-v1"),
+    ],
+)
+def test_template_evaluator_rejects_other_profiles_and_aggregators(
+    tmp_path: Path, artifact: dict[str, Any], aggregation: str
+) -> None:
+    ev = _load_template(tmp_path, artifact, aggregation)
+    assert ev.health() == "degraded_incompatible"
+    assert ev.predict(_FEATURES, "resident-alpha") is None
+
+
+def test_single_frame_evaluator_rejects_an_artifact_carrying_an_aggregator(tmp_path: Path) -> None:
+    assert _load(tmp_path, _V2 | {"aggregation": "qwmean-v1"}).health() == "degraded_incompatible"

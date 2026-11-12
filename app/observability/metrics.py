@@ -58,3 +58,9 @@ visitor_named_total = Counter(
     "pid_visitor_named_total",
     "Visitor clusters named into a household member.",
 )
+
+template_matches_total = Counter(
+    "pid_template_matches_total",
+    "Face templates matched by /match-template, by the template's recognition state.",
+    ["recognition_state"],
+)

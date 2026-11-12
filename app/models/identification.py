@@ -86,6 +86,17 @@ class FaceDetection(BaseModel):
     arcface_model_version: str = Field(default="")
     model_profile: str = Field(default="")
     preprocessing_version: str = Field(default="")
+    # Set only when the request asked for it (``/identify`` with ``return_embedding``).
+    embedding_f16_b64: str | None = Field(
+        default=None,
+        description=(
+            "The face's ArcFace embedding: 512 little-endian float16 values, base64. Biometric "
+            "data for a follow-up /match-template call; callers must not log or persist it"
+        ),
+    )
+    embedding_model_version: str | None = Field(
+        default=None, description="ArcFace model version of embedding_f16_b64"
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -129,6 +140,13 @@ class IdentifyRequest(BaseModel):
     )
     save_guest_images: bool = Field(
         default=False, description="Save images if unidentified guests are detected"
+    )
+    return_embedding: bool = Field(
+        default=False,
+        description=(
+            "Include each face's embedding (embedding_f16_b64) so the caller can later match "
+            "several faces of one person as a template; callers must not persist it"
+        ),
     )
 
 

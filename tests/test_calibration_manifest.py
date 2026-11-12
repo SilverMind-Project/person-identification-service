@@ -255,3 +255,88 @@ def test_manifest_round_trips_with_a_content_hash(tmp_path: Path) -> None:
         "crop_jpeg_quality": 95,
     }
     assert len(loaded_meta["dataset_hash"]) == 64
+
+
+# --- template profile ----------------------------------------------------------------------------
+
+
+def _walk(identity: str | None, start: int, count: int, *, minutes0: float = 0) -> list:
+    kind = "member" if identity else "not_enrolled"
+    return [
+        _candidate(start + i, kind=kind, identity=identity, minutes=minutes0 + i * 0.5)
+        for i in range(count)
+    ]
+
+
+def test_template_records_draw_subsets_within_one_episode_and_cap_them() -> None:
+    from app.calibration.manifest import template_records
+    from app.services.template_aggregation import QualityWeightedMeanAggregator
+
+    # Two alpha walks an hour apart (two episodes) and one visitor walk.
+    candidates = [
+        *_walk("alpha", 0, 6),
+        *_walk("alpha", 20, 3, minutes0=60),
+        *_walk(None, 40, 4, minutes0=120),
+    ]
+    meta = ManifestMeta()
+
+    records = template_records(
+        candidates,
+        _GALLERY,
+        episode_gap_s=300,
+        meta=meta,
+        aggregator=QualityWeightedMeanAggregator(),
+        max_per_episode=5,
+    )
+
+    probes = {r.probe_id: r for r in records}
+    by_episode: dict[str, set[str]] = {}
+    for r in records:
+        by_episode.setdefault(r.episode_id, set()).add(r.probe_id)
+        assert r.probe_id.startswith(f"template:{r.episode_id}:")
+    # Six faces allow 5 templates; three faces allow only 4 subsets of size 2 or 3.
+    assert sorted(len(p) for p in by_episode.values()) == [4, 5, 5]
+    assert len(probes) == 14
+    # Every template is scored against every enrolled identity, genuine only for its own.
+    alpha_records = [r for r in records if r.probe_identity_id == "alpha"]
+    assert {r.label for r in alpha_records if r.identity_id == "alpha"} == {1}
+    assert {r.label for r in records if r.probe_identity_id is None} == {0}
+    assert (meta.profile, meta.aggregation, meta.max_records_per_episode) == (
+        "template",
+        "qwmean-v1",
+        5,
+    )
+    assert meta.open_set_probes == 5
+
+
+def test_template_records_are_deterministic_for_a_seed() -> None:
+    from app.calibration.manifest import template_records
+    from app.services.template_aggregation import QualityWeightedMeanAggregator
+
+    candidates = _walk("alpha", 0, 8)
+
+    def build(seed: int) -> list:
+        return template_records(
+            candidates,
+            _GALLERY,
+            episode_gap_s=300,
+            meta=ManifestMeta(),
+            aggregator=QualityWeightedMeanAggregator(),
+            random_seed=seed,
+        )
+
+    assert build(7) == build(7)
+    assert build(7) != build(8)
+
+
+def test_episode_subsets_respect_sizes_and_skip_single_faces() -> None:
+    import random
+
+    from app.calibration.manifest import episode_subsets
+
+    subsets = episode_subsets(10, random.Random(1), max_subsets=20)
+    assert len(subsets) == len(set(subsets)) == 20
+    assert all(2 <= len(s) <= 8 for s in subsets)
+    assert all(max(s) < 10 for s in subsets)
+    assert episode_subsets(1, random.Random(1), max_subsets=20) == []
+    assert sorted(episode_subsets(2, random.Random(1), max_subsets=20)) == [(0, 1)]

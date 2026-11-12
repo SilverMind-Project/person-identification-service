@@ -67,6 +67,13 @@ Rules:
   `__post_init__`, so every producer carries the same measurement.
 - Face quality is part of the identify contract (`quality`, see the face-confidence-calibration
   skill); it is computed only in `app/services/face_quality.py`.
+- Embeddings leave the service only on request: `/identify` with `return_embedding` adds
+  `embedding_f16_b64` (512 little-endian float16 values, base64, encoded and decoded only in
+  `app/services/template_aggregation.py`) for a later `/match-template` call. They are biometric
+  data; every consumer must hold them in memory only and never log or persist them.
+- `/match-template` follows the store pattern: `TemplateMatchService` (no SQL) sequences the
+  `TemplateAggregator`, `EnrollmentRepository.nearest_centroids(k=2)`, and `classify_match` with
+  its own `MatchThresholds`; it has no side effects.
 - Side effects are explicit. `/identify` currently writes visitor sightings for unknown faces on
   every call (`_ingest_unknown_faces` in `app/routers/identification.py`) and, with
   `calibration_capture.enabled` and a `capture_context`, queues sampled faces as calibration

@@ -43,6 +43,12 @@ recognition:
   threshold: "${RECOGNITION_THRESHOLD:0.4}"
   # Below this threshold, face is "definitely unknown" (not even uncertain).
   unknown_threshold: 0.25
+  # The same two thresholds for /match-template templates (raw cosine of the quality-weighted mean
+  # of several faces to a centroid). Averaging removes per-face noise, so a template scores higher
+  # than its members; these start equal to the single-face values until a template calibration
+  # fit shows where they should sit. Calibrated confidence, not these, decides authority.
+  template_threshold: 0.4
+  template_unknown_threshold: 0.25
 
 # Motion direction detection
 motion:
@@ -81,6 +87,9 @@ annotation:
 #   in the artifact; mismatch causes degraded_incompatible and calibrated_confidence=null.
 calibration:
   artifact_path: "${CALIBRATION_ARTIFACT_PATH:}"
+  # Schema 2 artifact fitted with the template profile (build-manifest --profile template); it
+  # calibrates /match-template scores only. Empty means templates carry no calibrated confidence.
+  template_artifact_path: "${CALIBRATION_TEMPLATE_ARTIFACT_PATH:}"
   arcface_model_version: "${CALIBRATION_ARCFACE_MODEL_VERSION:buffalo_l}"
   preprocessing_version: "${CALIBRATION_PREPROCESSING_VERSION:v1}"
 

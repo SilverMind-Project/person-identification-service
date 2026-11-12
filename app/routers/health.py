@@ -26,6 +26,7 @@ async def health(request: Request):
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
     evaluator = request.app.state.calibration_evaluator
+    template_evaluator = request.app.state.template_calibration_evaluator
 
     cal_state = evaluator.health()
     for _s in ("ready", "degraded_missing", "degraded_incompatible", "degraded_invalid"):
@@ -47,6 +48,15 @@ async def health(request: Request):
             "profile": evaluator.calibration_profile(),
             "quality_version": evaluator.quality_version(),
             "covered_identities": evaluator.covered_identities(),
+        },
+        # Calibration for /match-template templates: its own artifact, profile, and coverage.
+        "template_calibration": {
+            "status": template_evaluator.health(),
+            "artifact_version": template_evaluator.artifact_version(),
+            "profile": template_evaluator.calibration_profile(),
+            "aggregation": template_evaluator.aggregation(),
+            "quality_version": template_evaluator.quality_version(),
+            "covered_identities": template_evaluator.covered_identities(),
         },
     }
 

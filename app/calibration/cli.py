@@ -180,13 +180,17 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 def _cmd_validate(args: argparse.Namespace) -> int:
     """Validate artifact schema, monotonicity, and finite-range checks."""
     from app.calibration.evaluator import CalibrationEvaluator
+    from app.services.template_aggregation import QualityWeightedMeanAggregator
 
+    template = args.calibration_profile == "template"
     evaluator = CalibrationEvaluator.from_artifact_path(
         args.artifact,
         expected_arcface_model_version=args.arcface_model_version or "",
         expected_model_profile=args.model_profile or "",
         expected_preprocessing_version=args.preprocessing_version or "",
         expected_quality_version=args.quality_version or "",
+        expected_calibration_profile=args.calibration_profile,
+        expected_aggregation=QualityWeightedMeanAggregator.version if template else None,
     )
     state = evaluator.health()
     print(f"calibration_health: {state}")
@@ -219,10 +223,12 @@ async def _build_manifest(args: argparse.Namespace) -> int:
         external_records,
         household_records,
         load_external_listing,
+        template_records,
         write_manifest,
     )
     from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
     from app.services.enrollment_repository import PostgresEnrollmentRepository
+    from app.services.template_aggregation import QualityWeightedMeanAggregator
 
     dsn = config.get("database.dsn")
     if not dsn:
@@ -249,9 +255,25 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     meta = ManifestMeta()
     gallery = {pid: [GalleryEmbedding(e) for e in rows] for pid, rows in embeddings.items()}
     try:
-        records = household_records(
-            candidates, gallery, episode_gap_s=args.episode_gap_s, meta=meta
-        )
+        if args.profile == "template":
+            if args.external:
+                print(
+                    "FAIL: external sets are single-face data; a template manifest is household-only"
+                )
+                return 1
+            records = template_records(
+                candidates,
+                gallery,
+                episode_gap_s=args.episode_gap_s,
+                meta=meta,
+                aggregator=QualityWeightedMeanAggregator(),
+                max_per_episode=args.max_records_per_episode,
+                random_seed=args.random_seed,
+            )
+        else:
+            records = household_records(
+                candidates, gallery, episode_gap_s=args.episode_gap_s, meta=meta
+            )
         if args.external:
             entries, licence = load_external_listing(Path(args.external))
             faces, dropped = await _detect_external(entries)
@@ -327,6 +349,7 @@ def _cmd_fit_v2(args: argparse.Namespace) -> int:
     result = run_fit_v2(
         records,
         meta,
+        profile=meta.get("profile", "single_frame"),
         model_profile=args.model_profile,
         allow_household_only=args.allow_household_only,
         gates=gates,
@@ -401,12 +424,33 @@ def main(argv: list[str] | None = None) -> int:
     p_val.add_argument("--model-profile", dest="model_profile", default=None)
     p_val.add_argument("--preprocessing-version", dest="preprocessing_version", default=None)
     p_val.add_argument("--quality-version", dest="quality_version", default=None)
+    p_val.add_argument(
+        "--calibration-profile",
+        dest="calibration_profile",
+        choices=("single_frame", "template"),
+        default="single_frame",
+        help="the profile the service will load the artifact for",
+    )
 
     # -- build-manifest --
     p_manifest = sub.add_parser("build-manifest", help="Build a v2 score manifest from labels")
     p_manifest.add_argument("--output", required=True, help="manifest .jsonl path (private data)")
     p_manifest.add_argument("--external", default=None, help="external set JSONL (needs Triton)")
     p_manifest.add_argument("--episode-gap-s", dest="episode_gap_s", type=float, default=300.0)
+    p_manifest.add_argument(
+        "--profile",
+        choices=("single_frame", "template"),
+        default="single_frame",
+        help="single faces, or templates of 2 to 8 faces drawn within one episode",
+    )
+    p_manifest.add_argument(
+        "--max-records-per-episode",
+        dest="max_records_per_episode",
+        type=int,
+        default=20,
+        help="template profile: templates drawn per episode (they are near-duplicates)",
+    )
+    p_manifest.add_argument("--random-seed", dest="random_seed", type=int, default=42)
 
     # -- fit-v2 --
     p_v2 = sub.add_parser("fit-v2", help="Fit a schema 2 artifact with household-holdout gates")

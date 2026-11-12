@@ -15,9 +15,17 @@ from pgvector.asyncpg import register_vector
 from triton_shared.client import TritonGrpcClient
 
 from app import config
-from app.calibration.evaluator import CalibrationEvaluator
+from app.calibration.evaluator import TEMPLATE_PROFILE, CalibrationEvaluator
 from app.db.migrate import run_migrations
-from app.routers import calibration, enrollment, health, identification, motion, visitors
+from app.routers import (
+    calibration,
+    enrollment,
+    health,
+    identification,
+    motion,
+    templates,
+    visitors,
+)
 from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
 from app.services.calibration_capture import (
     CalibrationCaptureService,
@@ -33,6 +41,8 @@ from app.services.guest_store import GuestImageStore
 from app.services.match_policy import MatchThresholds
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
+from app.services.template_aggregation import QualityWeightedMeanAggregator
+from app.services.template_match import TemplateMatchService
 from app.services.visitor_store import VisitorStore
 
 _RETENTION_INTERVAL_S = 24 * 60 * 60
@@ -126,8 +136,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.face_engine = face_engine
         app.state.triton_client = triton_client
 
+        enrollment_repository = PostgresEnrollmentRepository(pool)
         enrollment_store = EnrollmentStore(
-            PostgresEnrollmentRepository(pool),
+            enrollment_repository,
             face_engine,
             MatchThresholds(
                 recognized_min_similarity=float(config.get("recognition.threshold", 0.4)),
@@ -135,6 +146,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
         )
         app.state.enrollment_store = enrollment_store
+        template_aggregator = QualityWeightedMeanAggregator()
+        app.state.template_matcher = TemplateMatchService(
+            enrollment_repository,
+            template_aggregator,
+            MatchThresholds(
+                recognized_min_similarity=float(config.get("recognition.template_threshold", 0.4)),
+                candidate_min_similarity=float(
+                    config.get("recognition.template_unknown_threshold", 0.25)
+                ),
+            ),
+        )
+        app.state.face_quality_version = quality_scorer.version
 
         app.state.motion_detector = MotionDetector()
 
@@ -168,6 +191,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             expected_quality_version=quality_scorer.version,
         )
         app.state.calibration_evaluator = calibration_evaluator
+        template_calibration_evaluator = CalibrationEvaluator.from_artifact_path(
+            config.get("calibration.template_artifact_path", "") or None,
+            expected_arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
+            expected_model_profile=str(face_engine.model_profile),
+            expected_preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
+            expected_quality_version=quality_scorer.version,
+            expected_calibration_profile=TEMPLATE_PROFILE,
+            expected_aggregation=template_aggregator.version,
+        )
+        app.state.template_calibration_evaluator = template_calibration_evaluator
+        logger.info(
+            "Template calibration evaluator status=%s artifact_version=%s",
+            template_calibration_evaluator.health(),
+            template_calibration_evaluator.artifact_version(),
+        )
         logger.info(
             "Calibration evaluator status=%s artifact_version=%s",
             calibration_evaluator.health(),
@@ -209,6 +247,7 @@ def create_app() -> FastAPI:
     app.include_router(visitors.router)
     app.include_router(calibration.router)
     app.include_router(identification.router)
+    app.include_router(templates.router)
     app.include_router(motion.router)
 
     return app

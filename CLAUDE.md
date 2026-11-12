@@ -74,6 +74,8 @@ any blocked command yourself with `!` if it is intended. `make hooks-test` is pa
 ## Cross-repository contracts
 
 - **Face wire contract.** continuous-tracking calls `POST /api/v1/identify` with one person crop
+  (with `return_embedding` while face templates are on) and `POST /api/v1/match-template` with the
+  embeddings of several faces of one tracked person
   (`continuous-tracking/tracking-orchestrator/app/inference/face_id_client.py`); cognitive-companion uses
   `/identify-batch`, enrollment, visitors, and calibration review
   (`cognitive-companion/backend/integrations/person_id_client.py`). A field added to, renamed in,

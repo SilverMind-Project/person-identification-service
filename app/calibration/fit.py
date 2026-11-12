@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -575,7 +575,9 @@ DEFAULT_GATES_V2: dict[str, float] = {
     # Applies to closed-set and open-set impostors together, and to open-set alone.
     "max_fmr_at_operating_point": 0.01,
     "operating_point_threshold": 0.80,
-    # Holdout genuine faces an identity needs before the artifact covers it.
+    # Holdout genuine faces an identity needs before the artifact covers it. For the template
+    # profile this counts distinct holdout episodes, because the templates of one episode are
+    # near-duplicates of each other.
     "min_holdout_genuine_per_identity": 30,
     # Household plus external identities in the fit split.
     "min_fit_identities": 5,
@@ -767,9 +769,30 @@ def run_fit_v2(
     random_seed: int = 42,
     output_path: Path | None = None,
     tool_version: str = "2.0.0",
+    profile: Literal["single_frame", "template"] = "single_frame",
 ) -> FitV2Result:
-    """Fit, gate on the household holdout, and write a schema 2 artifact only if every gate passes."""
+    """Fit, gate on the household holdout, and write a schema 2 artifact only if every gate passes.
+
+    ``profile`` is what the records describe: single faces, or templates built by the manifest's
+    template profile (whose ``meta`` must name the aggregator). The artifact records the profile,
+    the aggregator, and every gate it was held to.
+    """
     g = {**DEFAULT_GATES_V2, **(gates or {})}
+    aggregation: str | None = None
+    if profile == "template":
+        aggregation = meta.get("aggregation")
+        if not aggregation or meta.get("profile") != "template":
+            return FitV2Result(
+                None,
+                ["template fit needs a template manifest: rebuild with --profile template"],
+                [],
+            )
+        if meta.get("max_records_per_episode") is not None:
+            g["max_records_per_episode"] = float(meta["max_records_per_episode"])
+    elif meta.get("profile", "single_frame") != "single_frame":
+        return FitV2Result(
+            None, [f"manifest profile {meta.get('profile')!r} needs --profile to match"], []
+        )
     operating_point = float(g["operating_point_threshold"])
     has_external = any(r.dataset == "external" for r in records)
     if not has_external and not allow_household_only:
@@ -826,9 +849,17 @@ def run_fit_v2(
         sum(1 for p in open_set if p >= operating_point) / len(open_set) if open_set else None
     )
     genuine_by_identity: dict[str, int] = {}
-    for r in holdout:
-        if r.label == 1:
-            genuine_by_identity[r.identity_id] = genuine_by_identity.get(r.identity_id, 0) + 1
+    if profile == "template":
+        genuine_episodes: dict[str, set[str]] = {}
+        for r in holdout:
+            if r.label == 1:
+                genuine_episodes.setdefault(r.identity_id, set()).add(r.episode_id)
+        genuine_by_identity = {identity: len(eps) for identity, eps in genuine_episodes.items()}
+    else:
+        for r in holdout:
+            if r.label == 1:
+                genuine_by_identity[r.identity_id] = genuine_by_identity.get(r.identity_id, 0) + 1
+    coverage_unit = "episodes" if profile == "template" else "faces"
     covered = sorted(
         identity
         for identity, count in genuine_by_identity.items()
@@ -850,7 +881,8 @@ def run_fit_v2(
         failures.append(f"open-set fmr {open_set_fmr:.4f} > {g['max_fmr_at_operating_point']}")
     if not covered:
         failures.append(
-            f"no identity has {int(g['min_holdout_genuine_per_identity'])} holdout genuine faces"
+            f"no identity has {int(g['min_holdout_genuine_per_identity'])} holdout genuine "
+            f"{coverage_unit}"
         )
     if len(fit_identities) < g["min_fit_identities"]:
         failures.append(f"fit identities {len(fit_identities)} < {int(g['min_fit_identities'])}")
@@ -860,6 +892,7 @@ def run_fit_v2(
         "holdout": metrics.model_dump(),
         "open_set_fmr": open_set_fmr,
         "holdout_genuine_by_identity": genuine_by_identity,
+        "coverage_unit": coverage_unit,
         "covered_identities": covered,
         "reliability": reliability_bins(holdout_probs, holdout_labels),
         "fit_identities": sorted(fit_identities),
@@ -899,7 +932,9 @@ def run_fit_v2(
             fit_identities=len(fit_identities),
         ),
         metrics=metrics,
-        profile="single_frame",
+        profile=profile,
+        aggregation=aggregation,
+        gates=g,
         quality_version=str(meta["quality_version"]),
         features=list(features),
         coefficients=coefficients,

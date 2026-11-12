@@ -203,8 +203,8 @@ In `app.main` lifespan (order matters):
 5. Open `TritonGrpcClient`, build `FaceEngine`, and require all five configured models to be ready
 6. `EnrollmentStore(PostgresEnrollmentRepository(pool), face_engine, MatchThresholds(...))` (thresholds from `recognition.*`), `MotionDetector()`, `GuestImageStore(pool, minio_client)`
 7. `VisitorStore(pool, minio_client)`, `CalibrationCaptureService` (started; seeds today's caps and runs its worker only when `calibration_capture.enabled`), plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters and expired calibration captures)
-8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, preprocessing, and quality scorer versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure
-9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_candidates`, `calibration_capture`, `calibration_evaluator`
+8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, preprocessing, and quality scorer versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure. A second evaluator loads `calibration.template_artifact_path` for the `template` profile, bound to the template aggregator's version; `TemplateMatchService` (the same `PostgresEnrollmentRepository`, `QualityWeightedMeanAggregator`, and `MatchThresholds` from `recognition.template_*`) serves `/match-template`
+9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `template_matcher`, `face_quality_version`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_candidates`, `calibration_capture`, `calibration_evaluator`, `template_calibration_evaluator`
 10. On shutdown: cancel the retention task, stop the capture worker, close Triton, then close the database pool
 
 ### 5.4 Configuration
@@ -231,7 +231,10 @@ Key settings:
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
 | `recognition.threshold` | `RECOGNITION_THRESHOLD` | `0.4` | Cosine similarity for positive ID |
 | `recognition.unknown_threshold` | -- | `0.25` | Lower bound of the `candidate` band; below is `unrecognized` |
+| `recognition.template_threshold` | -- | `0.4` | The recognition threshold for `/match-template` templates; starts equal to the single-face value until a template fit shows otherwise |
+| `recognition.template_unknown_threshold` | -- | `0.25` | The `candidate` lower bound for templates |
 | `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Calibration artifact JSON (schema 1 or 2); empty means `degraded_missing`. Schema 2 binds to the quality scorer version and covers only its listed identities |
+| `calibration.template_artifact_path` | `CALIBRATION_TEMPLATE_ARTIFACT_PATH` | empty | Schema 2 artifact with `profile: template` (built with `build-manifest --profile template`); calibrates `/match-template` only, and binds to the template aggregator version |
 | `face_quality.scorer` | -- | `heuristic-v1` | Face quality scorer; unknown names fail startup |
 | `face_quality.heuristic.*` | -- | see settings | Ramp anchors and geometric-mean weights; a change is a new scorer version |
 | `calibration_capture.enabled` | -- | `false` | Sample faces from tracker `/identify` calls into the calibration set |
@@ -388,7 +391,7 @@ Domain endpoints are under `/api/v1`. Health and metrics are at the root. There 
 
 | Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/health` | `status`, `inference_backend`, `triton_endpoint`, `model_profile`, `enrolled_members`, `model`, `models`, and `calibration` (`status`, `artifact_version`, `arcface_model_version`, `preprocessing_version`) |
+| `GET` | `/health` | `status`, `inference_backend`, `triton_endpoint`, `model_profile`, `enrolled_members`, `model`, `models`, `calibration` (`status`, `artifact_version`, `arcface_model_version`, `preprocessing_version`, `profile`, `quality_version`, `covered_identities`), and `template_calibration` (the same for the template artifact, plus `aggregation`) |
 | `GET` | `/metrics` | Prometheus text format |
 
 ### Enrollment
@@ -413,11 +416,15 @@ Enroll error handling:
 | --- | --- | --- | --- |
 | `POST` | `/api/v1/identify` | `IdentifyRequest` | `IdentifyResponse` |
 | `POST` | `/api/v1/identify-batch` | `BatchIdentifyRequest` | `BatchIdentifyResponse` |
+| `POST` | `/api/v1/match-template` | `MatchTemplateRequest` | `MatchTemplateResponse` |
 
 `IdentifyRequest` fields:
 - `image`: base64-encoded JPEG/PNG (with or without `data:` URI prefix)
 - `include_annotated_image`: bool (default false)
 - `save_guest_images`: bool (default false)
+- `return_embedding`: bool (default false); each face then carries `embedding_f16_b64` (512 little-endian float16 values, base64) and `embedding_model_version`, for a later `/match-template` call. Callers must not log or persist it
+
+`MatchTemplateRequest` carries 2 to 16 `members` (`embedding_f16_b64` and the `quality` object from the same `/identify` response) and `embedding_model_version`. The service aggregates the members with `QualityWeightedMeanAggregator` (`qwmean-v1`: quality-weighted mean of normalized embeddings, renormalized, `app/services/template_aggregation.py`), queries the two nearest centroids, and classifies the template with `classify_match` and the `recognition.template_*` thresholds. The response carries `raw_similarity`, `second_best_similarity`, `member_count`, `aggregator_version`, `template_quality` (means over the three best members by quality score, the same rule the template manifest uses), and `calibrated_confidence` from the template artifact only. A wrong `embedding_model_version`, a member quality from another scorer version, an undecodable embedding, or members that cannot aggregate is a 422 with a `detail.code`. It has no side effects (no image is received).
 
 `BatchIdentifyRequest` fields:
 - `images`: list of base64 strings (min 1)

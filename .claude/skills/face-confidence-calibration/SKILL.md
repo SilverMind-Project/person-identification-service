@@ -121,9 +121,21 @@ be ignored by Git. Commit only schemas, synthetic examples, loaders, and tests.
   identity, including one enrolled after the fit, so a roster change means recalibrating before
   that person gains authority. Never replace this allowlist with a list of excluded identities.
 - **Binding.** A schema 2 artifact binds to the ArcFace model, model profile, preprocessing
-  version, the face-quality scorer version (the injected scorer's `version`), and the
-  `single_frame` profile; any mismatch is `degraded_incompatible`. Responses carry
-  `calibration_profile`, and tracking-orchestrator also checks the face's `quality.version`.
+  version, the face-quality scorer version (the injected scorer's `version`), and its profile;
+  any mismatch is `degraded_incompatible`. Responses carry `calibration_profile`, and
+  tracking-orchestrator also checks the face's `quality.version`.
+- **Template profile.** A template (several faces of one tracked person, aggregated) is a
+  different score from a single face and is never calibrated by a `single_frame` artifact. The
+  service runs two evaluators: `calibration.artifact_path` for `single_frame` and
+  `calibration.template_artifact_path` for `template`; a template artifact also binds to its
+  aggregator (`aggregation: qwmean-v1`) and is `degraded_incompatible` under any other.
+  `build-manifest --profile template` draws templates of 2 to 8 faces from within one labeled
+  episode (seeded, at most `--max-records-per-episode`, default 20, because templates of one walk
+  are near-duplicates), aggregates and quality-scores them with the same functions
+  `/match-template` uses (`app/services/template_aggregation.py`: top-3-by-score means of every
+  quality component), and scores them leave-episode-out like single probes. `fit-v2` reads the
+  profile from the manifest, counts the coverage gate in distinct holdout episodes for templates,
+  and records `profile`, `aggregation`, and every gate in the artifact.
 
 ## Tooling
 

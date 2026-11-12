@@ -269,6 +269,18 @@
       "title": "Quality Version",
       "type": "string"
     },
+    "aggregation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Aggregation"
+    },
     "features": {
       "items": {
         "type": "string"
@@ -377,6 +389,13 @@
       },
       "title": "External Datasets",
       "type": "array"
+    },
+    "gates": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Gates",
+      "type": "object"
     }
   },
   "required": [

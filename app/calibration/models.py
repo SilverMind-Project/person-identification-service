@@ -103,6 +103,9 @@ class CalibrationArtifactV2(CalibrationManifest):
     method: Literal["logistic_v2", "isotonic"]  # type: ignore[assignment]
     profile: Literal["single_frame", "template"] = "single_frame"
     quality_version: str = Field(..., min_length=1)
+    # The template aggregator the scores were fitted with (``qwmean-v1``); None for single_frame.
+    # A template artifact applied with another aggregator would calibrate a different score.
+    aggregation: str | None = None
     features: list[str] = Field(..., min_length=1)
     coefficients: list[float] | None = None
     intercept: float | None = None
@@ -115,3 +118,6 @@ class CalibrationArtifactV2(CalibrationManifest):
     household_holdout_metrics: CalibrationMetrics = Field(default_factory=CalibrationMetrics)
     open_set_fmr_at_operating_point: float | None = None
     external_datasets: list[ExternalDatasetRef] = Field(default_factory=list)
+    # The acceptance gates the fit ran under, including the template caps (records per episode,
+    # coverage counted in holdout episodes), so an artifact states what it was held to.
+    gates: dict[str, float] = Field(default_factory=dict)

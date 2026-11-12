@@ -249,3 +249,64 @@ def test_cli_validate_and_inspect_accept_a_fitted_v2_artifact(
     assert cli_main(["inspect", "--artifact", str(output)]) == 0
     assert '"schema_version": 2' in capsys.readouterr().out
     assert cli_main(["validate", "--artifact", str(output), "--quality-version", "other-v2"]) == 1
+
+
+# --- template profile ----------------------------------------------------------------------------
+
+_TEMPLATE_META = _META | {
+    "profile": "template",
+    "aggregation": "qwmean-v1",
+    "max_records_per_episode": 20,
+}
+
+
+def test_template_fit_counts_coverage_in_holdout_episodes_and_records_its_gates() -> None:
+    # Each strong identity has 20 episodes, so 4 land in the holdout (32 genuine records).
+    enough = run_fit_v2(
+        _records(),
+        _TEMPLATE_META,
+        model_profile="full",
+        allow_household_only=True,
+        profile="template",
+        gates={"min_holdout_genuine_per_identity": 4},
+    )
+    too_strict = run_fit_v2(
+        _records(),
+        _TEMPLATE_META,
+        model_profile="full",
+        allow_household_only=True,
+        profile="template",
+        gates={"min_holdout_genuine_per_identity": 5},
+    )
+
+    assert enough.failures == []
+    artifact = enough.artifact
+    assert artifact is not None
+    assert (artifact.profile, artifact.aggregation) == ("template", "qwmean-v1")
+    assert artifact.covered_identities == sorted(_STRONG)
+    assert artifact.gates["max_records_per_episode"] == 20.0
+    assert artifact.gates["min_holdout_genuine_per_identity"] == 4.0
+    assert enough.report["coverage_unit"] == "episodes"
+    # 32 genuine records would clear 5; 4 episodes do not.
+    assert too_strict.artifact is None
+    assert any("holdout genuine episodes" in f for f in too_strict.failures)
+
+
+def test_profile_and_manifest_must_agree() -> None:
+    template_on_frames = run_fit_v2(
+        _records(), _META, model_profile="full", allow_household_only=True, profile="template"
+    )
+    frames_on_templates = run_fit_v2(
+        _records(), _TEMPLATE_META, model_profile="full", allow_household_only=True
+    )
+    assert template_on_frames.artifact is None
+    assert any("template manifest" in f for f in template_on_frames.failures)
+    assert frames_on_templates.artifact is None
+    assert any("profile" in f for f in frames_on_templates.failures)
+
+
+def test_single_frame_fit_records_no_aggregator_and_its_gates() -> None:
+    result = run_fit_v2(_records(), _META, model_profile="full", allow_household_only=True)
+    assert result.artifact is not None
+    assert (result.artifact.profile, result.artifact.aggregation) == ("single_frame", None)
+    assert result.artifact.gates["min_holdout_genuine_per_identity"] == 30.0

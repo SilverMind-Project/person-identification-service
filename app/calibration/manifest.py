@@ -15,13 +15,19 @@ record their source candidate.
 External faces (an optional research set) go through the same face engine and quality scorer as
 live faces; their records are scored against their own identities' leave-one-out centroids and are
 marked ``dataset = external`` so the fitter can split them by identity and never gate on them.
-Numpy only; offline.
+
+The ``template`` profile calibrates aggregated templates instead of single faces: each record is a
+template of k faces (k from 2 to 8) drawn from one episode, aggregated and quality-scored by the
+same functions ``/match-template`` uses, and scored like a probe. Templates of one episode are
+highly correlated, so at most ``max_per_episode`` are drawn from each. Numpy only; offline.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -34,9 +40,16 @@ import numpy as np
 from app.calibration.episodes import EpisodeInput, assign_episodes, episode_label
 from app.services.calibration_candidates import CalibrationCandidate
 from app.services.face_models import DetectedFace
+from app.services.face_quality import FaceQuality
+from app.services.template_aggregation import TemplateAggregator, template_quality
 
 Dataset = Literal["household", "external"]
+Profile = Literal["single_frame", "template"]
 QUALITY_FIELDS = ("quality_score", "resolution", "sharpness", "detection", "pitch")
+# Template records: member counts drawn per template, and the cap on templates per episode.
+TEMPLATE_MIN_MEMBERS = 2
+TEMPLATE_MAX_MEMBERS = 8
+DEFAULT_TEMPLATES_PER_EPISODE = 20
 
 
 class ManifestError(ValueError):
@@ -83,6 +96,10 @@ class ManifestMeta:
     capture_profile: dict[str, float] = field(default_factory=dict)
     external_datasets: list[dict[str, Any]] = field(default_factory=list)
     dataset_hash: str = ""
+    profile: Profile = "single_frame"
+    # Template profile only: the aggregator version and the per-episode template cap.
+    aggregation: str | None = None
+    max_records_per_episode: int | None = None
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -243,6 +260,119 @@ def household_records(
             meta.probes_by_identity[c.label_identity_id] = (
                 meta.probes_by_identity.get(c.label_identity_id, 0) + 1
             )
+    return records
+
+
+def _candidate_quality(c: CalibrationCandidate) -> FaceQuality:
+    return FaceQuality(
+        score=c.quality_score,
+        resolution=float(c.quality_components["resolution"]),
+        sharpness=float(c.quality_components["sharpness"]),
+        detection=float(c.quality_components["detection"]),
+        pitch=float(c.quality_components["pitch"]),
+        version=c.quality_version,
+    )
+
+
+def episode_subsets(
+    member_count: int,
+    rng: random.Random,
+    *,
+    max_subsets: int,
+    min_members: int = TEMPLATE_MIN_MEMBERS,
+    max_members: int = TEMPLATE_MAX_MEMBERS,
+) -> list[tuple[int, ...]]:
+    """Distinct member-index subsets of one episode, sizes drawn uniformly, at most ``max_subsets``.
+
+    Deterministic for a seeded ``rng``. An episode with fewer than ``min_members`` faces yields
+    nothing; a small episode yields every subset it has when that is fewer than ``max_subsets``.
+    """
+    largest = min(max_members, member_count)
+    if largest < min_members:
+        return []
+    available = sum(math.comb(member_count, k) for k in range(min_members, largest + 1))
+    wanted = min(max_subsets, available)
+    chosen: set[tuple[int, ...]] = set()
+    ordered: list[tuple[int, ...]] = []
+    attempts = 0
+    while len(ordered) < wanted and attempts < wanted * 50:
+        attempts += 1
+        k = rng.randint(min_members, largest)
+        subset = tuple(sorted(rng.sample(range(member_count), k)))
+        if subset not in chosen:
+            chosen.add(subset)
+            ordered.append(subset)
+    return ordered
+
+
+def template_records(
+    candidates: Sequence[CalibrationCandidate],
+    gallery: Mapping[str, Sequence[GalleryEmbedding]],
+    *,
+    episode_gap_s: float,
+    meta: ManifestMeta,
+    aggregator: TemplateAggregator,
+    max_per_episode: int = DEFAULT_TEMPLATES_PER_EPISODE,
+    random_seed: int = 42,
+) -> list[ScoreRecord]:
+    """Score records for templates drawn within labeled household episodes.
+
+    Every template's members come from one episode (one person, one camera, one walk), so a
+    template never mixes people; it is aggregated with ``aggregator`` (weights: member quality
+    score) and its features come from ``template_quality``, exactly as at runtime.
+    """
+    meta.profile = "template"
+    meta.aggregation = aggregator.version
+    meta.max_records_per_episode = max_per_episode
+    prepared = _household_probes(candidates, gallery, episode_gap_s=episode_gap_s, meta=meta)
+    if prepared is None:
+        return []
+
+    by_episode: dict[str, list[CalibrationCandidate]] = {}
+    for c in prepared.usable:
+        by_episode.setdefault(prepared.episodes[c.candidate_id], []).append(c)
+    rng = random.Random(random_seed)
+    records: list[ScoreRecord] = []
+    for episode in sorted(by_episode):
+        members = sorted(by_episode[episode], key=lambda c: c.candidate_id)
+        probe_identity = _probe_identity(members[0])
+        subsets = episode_subsets(len(members), rng, max_subsets=max_per_episode)
+        for index, subset in enumerate(subsets):
+            chosen = [members[i] for i in subset]
+            qualities = [_candidate_quality(c) for c in chosen]
+            template = aggregator.aggregate(
+                np.stack([np.asarray(c.embedding, dtype=np.float32) for c in chosen]),
+                np.asarray([q.score for q in qualities], dtype=np.float32),
+            )
+            quality = template_quality(qualities)
+            probe = _unit(np.asarray(template, dtype=np.float64))
+            for identity, similarity in _gallery_scores(
+                probe, probe_identity, episode, gallery, prepared
+            ):
+                records.append(
+                    ScoreRecord(
+                        probe_id=f"template:{episode}:{index}",
+                        episode_id=episode,
+                        identity_id=identity,
+                        probe_identity_id=probe_identity,
+                        label=int(identity == probe_identity),
+                        similarity=similarity,
+                        quality_score=quality.score,
+                        resolution=quality.resolution,
+                        sharpness=quality.sharpness,
+                        detection=quality.detection,
+                        pitch=quality.pitch,
+                        camera_id=chosen[0].camera_id,
+                        label_source=str(chosen[0].label_source),
+                        dataset="household",
+                    )
+                )
+            if probe_identity is None:
+                meta.open_set_probes += 1
+            else:
+                meta.probes_by_identity[probe_identity] = (
+                    meta.probes_by_identity.get(probe_identity, 0) + 1
+                )
     return records
 
 
