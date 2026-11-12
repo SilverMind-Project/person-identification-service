@@ -104,14 +104,22 @@ def _single(values: Iterable[Any], what: str) -> Any:
     return next(iter(distinct), None)
 
 
-def household_records(
+@dataclass
+class _HouseholdProbes:
+    usable: list[CalibrationCandidate]
+    episodes: dict[str, str]  # candidate id -> episode id
+    episode_members: dict[str, set[str]]  # episode id -> candidate ids
+    full_centroids: dict[str, np.ndarray | None]
+
+
+def _household_probes(
     candidates: Sequence[CalibrationCandidate],
     gallery: Mapping[str, Sequence[GalleryEmbedding]],
     *,
     episode_gap_s: float,
     meta: ManifestMeta,
-) -> list[ScoreRecord]:
-    """Score records for labeled household captures against every enrolled identity."""
+) -> _HouseholdProbes | None:
+    """Usable labeled captures, their episodes, and the gallery centroids; None if none usable."""
     usable: list[CalibrationCandidate] = []
     for c in candidates:
         if c.label_state != "labeled" or c.label_kind is None:
@@ -124,7 +132,7 @@ def household_records(
             continue
         usable.append(c)
     if not usable:
-        return []
+        return None
 
     meta.quality_version = _single((c.quality_version for c in usable), "quality_version")
     meta.arcface_model_version = _single(
@@ -155,25 +163,62 @@ def household_records(
         identity: _centroid([g.embedding for g in embeddings])
         for identity, embeddings in gallery.items()
     }
+    return _HouseholdProbes(usable, episodes, episode_members, full_centroids)
+
+
+def _gallery_scores(
+    probe: np.ndarray,
+    probe_identity: str | None,
+    episode: str,
+    gallery: Mapping[str, Sequence[GalleryEmbedding]],
+    prepared: _HouseholdProbes,
+) -> list[tuple[str, float]]:
+    """(identity, cosine) of a unit probe against every identity's centroid.
+
+    The probe's own identity is scored against a centroid without embeddings promoted from the
+    probe's episode (leave-episode-out).
+    """
+    scores: list[tuple[str, float]] = []
+    for identity in sorted(gallery):
+        centroid = prepared.full_centroids[identity]
+        if identity == probe_identity:
+            same_episode = prepared.episode_members[episode]
+            centroid = _centroid(
+                [
+                    g.embedding
+                    for g in gallery[identity]
+                    if g.source_candidate_id not in same_episode
+                ]
+            )
+        if centroid is not None:
+            scores.append((identity, float(np.dot(probe, centroid))))
+    return scores
+
+
+def _probe_identity(c: CalibrationCandidate) -> str | None:
+    return c.label_identity_id if c.label_kind == "member" else None
+
+
+def household_records(
+    candidates: Sequence[CalibrationCandidate],
+    gallery: Mapping[str, Sequence[GalleryEmbedding]],
+    *,
+    episode_gap_s: float,
+    meta: ManifestMeta,
+) -> list[ScoreRecord]:
+    """Score records for labeled household captures against every enrolled identity."""
+    prepared = _household_probes(candidates, gallery, episode_gap_s=episode_gap_s, meta=meta)
+    if prepared is None:
+        return []
 
     records: list[ScoreRecord] = []
-    for c in usable:
-        probe_identity = c.label_identity_id if c.label_kind == "member" else None
-        episode = episodes[c.candidate_id]
+    for c in prepared.usable:
+        probe_identity = _probe_identity(c)
+        episode = prepared.episodes[c.candidate_id]
         probe = _unit(np.asarray(c.embedding, dtype=np.float64))
-        for identity in sorted(gallery):
-            centroid = full_centroids[identity]
-            if identity == probe_identity:
-                same_episode = episode_members[episode]
-                centroid = _centroid(
-                    [
-                        g.embedding
-                        for g in gallery[identity]
-                        if g.source_candidate_id not in same_episode
-                    ]
-                )
-            if centroid is None:
-                continue
+        for identity, similarity in _gallery_scores(
+            probe, probe_identity, episode, gallery, prepared
+        ):
             records.append(
                 ScoreRecord(
                     probe_id=c.candidate_id,
@@ -181,7 +226,7 @@ def household_records(
                     identity_id=identity,
                     probe_identity_id=probe_identity,
                     label=int(identity == probe_identity),
-                    similarity=float(np.dot(probe, centroid)),
+                    similarity=similarity,
                     quality_score=c.quality_score,
                     resolution=float(c.quality_components["resolution"]),
                     sharpness=float(c.quality_components["sharpness"]),
@@ -192,8 +237,8 @@ def household_records(
                     dataset="household",
                 )
             )
-    meta.open_set_probes += sum(1 for c in usable if c.label_kind == "not_enrolled")
-    for c in usable:
+    meta.open_set_probes += sum(1 for c in prepared.usable if c.label_kind == "not_enrolled")
+    for c in prepared.usable:
         if c.label_identity_id is not None:
             meta.probes_by_identity[c.label_identity_id] = (
                 meta.probes_by_identity.get(c.label_identity_id, 0) + 1
