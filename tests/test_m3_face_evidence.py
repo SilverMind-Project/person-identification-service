@@ -48,54 +48,54 @@ def _make_frontal_3d_landmarks() -> np.ndarray:
     """
     pts = np.zeros((68, 3), dtype=np.float32)
     # Nose tip (idx 30)
-    pts[30] = [320.0, 280.0, 10.0]
+    pts[30] = [320.0, 280.0, 0.0]
     # Nose base right (31), left (35)
-    pts[31] = [310.0, 300.0, 5.0]
-    pts[35] = [330.0, 300.0, 5.0]
-    # Mouth (indices 52, 62, 63, 55, 66, 65)
-    pts[52] = [305.0, 360.0, 0.0]
-    pts[62] = [320.0, 365.0, 0.0]
-    pts[63] = [335.0, 360.0, 0.0]
-    pts[55] = [300.0, 370.0, -2.0]
-    pts[66] = [320.0, 375.0, -2.0]
-    pts[65] = [340.0, 370.0, -2.0]
-    # Jaw (indices 1, 9, 8, 7, 15)
-    pts[1] = [270.0, 350.0, 0.0]
-    pts[9] = [250.0, 380.0, -5.0]
-    pts[8] = [320.0, 410.0, -5.0]  # chin
-    pts[7] = [390.0, 380.0, -5.0]
-    pts[15] = [370.0, 350.0, 0.0]
-    # Eyes (indices 40, 42, 27, 39, 37)
-    pts[40] = [280.0, 260.0, 15.0]  # right eye outer
-    pts[42] = [300.0, 255.0, 15.0]  # right eye inner
-    pts[27] = [320.0, 250.0, 15.0]  # bridge
-    pts[39] = [340.0, 255.0, 15.0]  # left eye inner
-    pts[37] = [360.0, 260.0, 15.0]  # left eye outer
+    pts[31] = [310.0, 290.0, 5.0]
+    pts[35] = [330.0, 290.0, 5.0]
+    # Mouth (indices 48, 62, 54, 59, 66, 55)
+    pts[48] = [298.0, 315.0, 15.0]
+    pts[62] = [320.0, 322.0, 15.0]
+    pts[54] = [342.0, 315.0, 15.0]
+    pts[59] = [295.0, 330.0, 20.0]
+    pts[66] = [320.0, 336.0, 20.0]
+    pts[55] = [345.0, 330.0, 20.0]
+    # Jaw (indices 1, 7, 8, 9, 15)
+    pts[1] = [270.0, 285.0, 40.0]
+    pts[7] = [292.0, 365.0, 30.0]
+    pts[8] = [320.0, 385.0, 28.0]  # chin
+    pts[9] = [348.0, 365.0, 30.0]
+    pts[15] = [370.0, 285.0, 40.0]
+    # Eyes (indices 36, 39, 27, 42, 45)
+    pts[36] = [268.0, 250.0, 2.0]  # right eye outer
+    pts[39] = [292.0, 242.0, -3.0]  # right eye inner
+    pts[27] = [320.0, 242.0, -4.0]  # bridge
+    pts[42] = [348.0, 242.0, -3.0]  # left eye inner
+    pts[45] = [372.0, 250.0, 2.0]  # left eye outer
     return pts
 
 
 def _make_profile_3d_landmarks() -> np.ndarray:
     """Synthetic profile (looking right, ~45°) 3D landmarks."""
     pts = np.zeros((68, 3), dtype=np.float32)
-    pts[30] = [340.0, 280.0, 10.0]  # nose tip shifted right
-    pts[31] = [330.0, 295.0, 5.0]
-    pts[35] = [350.0, 300.0, 3.0]
-    pts[52] = [340.0, 360.0, 0.0]
-    pts[62] = [350.0, 365.0, 0.0]
-    pts[63] = [360.0, 360.0, -2.0]
-    pts[55] = [335.0, 368.0, -2.0]
-    pts[66] = [350.0, 375.0, -2.0]
-    pts[65] = [365.0, 368.0, -4.0]
-    pts[1] = [300.0, 345.0, 0.0]
-    pts[9] = [290.0, 375.0, -5.0]
-    pts[8] = [340.0, 408.0, -5.0]
-    pts[7] = [390.0, 375.0, -8.0]
-    pts[15] = [380.0, 345.0, -2.0]
-    pts[40] = [305.0, 258.0, 15.0]
-    pts[42] = [320.0, 253.0, 13.0]
-    pts[27] = [335.0, 248.0, 10.0]
-    pts[39] = [350.0, 255.0, 8.0]
-    pts[37] = [365.0, 260.0, 5.0]
+    pts[30] = [368.0, 280.0, 0.0]  # nose tip shifted right past jaw midline
+    pts[31] = [355.0, 290.0, 5.0]
+    pts[35] = [372.0, 290.0, 12.0]
+    pts[48] = [332.0, 315.0, 10.0]
+    pts[62] = [356.0, 322.0, 15.0]
+    pts[54] = [366.0, 315.0, 25.0]
+    pts[59] = [328.0, 330.0, 15.0]
+    pts[66] = [355.0, 336.0, 20.0]
+    pts[55] = [366.0, 330.0, 30.0]
+    pts[1] = [285.0, 285.0, 20.0]
+    pts[7] = [318.0, 365.0, 20.0]
+    pts[8] = [350.0, 385.0, 28.0]
+    pts[9] = [364.0, 365.0, 38.0]
+    pts[15] = [355.0, 285.0, 55.0]
+    pts[36] = [312.0, 250.0, -5.0]
+    pts[39] = [335.0, 242.0, -4.0]
+    pts[27] = [358.0, 242.0, 0.0]
+    pts[42] = [365.0, 242.0, 8.0]
+    pts[45] = [372.0, 250.0, 18.0]
     return pts
 
 
@@ -144,22 +144,26 @@ async def _can_connect() -> bool:
 
 class TestHeadPoseEstimation:
     def test_frontal_pose_returns_finite_values(self):
-        """Frontal face yields finite (non-NaN, non-inf) pose angles."""
+        """Frontal face yields finite (non-NaN, non-inf) near-zero pose angles."""
         lm = _make_frontal_3d_landmarks()
         face = _FakeFace(landmark_3d_68=lm)
         yaw, pitch, roll = _estimate_head_pose(face)
         assert np.isfinite(yaw)
         assert np.isfinite(pitch)
         assert np.isfinite(roll)
+        assert abs(yaw) < 15.0
+        assert abs(pitch) < 15.0
+        assert abs(roll) < 15.0
 
     def test_profile_pose_returns_finite_values(self):
-        """Profile face also yields finite pose angles (different geometry)."""
+        """Profile face also yields finite pose angles with substantial yaw."""
         lm = _make_profile_3d_landmarks()
         face = _FakeFace(landmark_3d_68=lm)
         yaw, pitch, roll = _estimate_head_pose(face)
         assert np.isfinite(yaw)
         assert np.isfinite(pitch)
         assert np.isfinite(roll)
+        assert abs(yaw) > 20.0
 
     def test_missing_landmarks_fails_explicitly(self):
         """Missing 3D landmarks are an invalid inference result."""

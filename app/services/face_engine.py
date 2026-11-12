@@ -50,25 +50,25 @@ _ARCFACE_DST = np.array(
 
 _CANONICAL_FACE_3D = np.array(
     [
-        [-0.06551, -0.16470, 0.35883],
-        [-0.08425, -0.16539, 0.33830],
-        [-0.04793, -0.17946, 0.34771],
-        [-0.10556, -0.22293, 0.27388],
-        [-0.07039, -0.24003, 0.27681],
-        [-0.02272, -0.22578, 0.27853],
-        [-0.11329, -0.25523, 0.23943],
-        [-0.07274, -0.26879, 0.24338],
-        [-0.01744, -0.25853, 0.24339],
-        [-0.15820, -0.17003, 0.18949],
-        [-0.12068, -0.32684, 0.20827],
-        [-0.07364, -0.36984, 0.21761],
-        [-0.01543, -0.33037, 0.21372],
-        [0.03492, -0.17698, 0.19435],
-        [-0.10127, -0.10354, 0.35388],
-        [-0.05344, -0.08787, 0.37268],
-        [0.00120, -0.08891, 0.37556],
-        [0.05597, -0.09063, 0.37276],
-        [0.10089, -0.10746, 0.34917],
+        [0.00000, 0.00000, 0.00000],
+        [-0.01816, 0.00772, 0.01582],
+        [0.01816, 0.00772, 0.01582],
+        [-0.04142, 0.05965, 0.08262],
+        [0.00000, 0.07533, 0.08202],
+        [0.04142, 0.05965, 0.08262],
+        [-0.04793, 0.09218, 0.11742],
+        [0.00000, 0.10409, 0.11545],
+        [0.04793, 0.09218, 0.11742],
+        [-0.09656, 0.00880, 0.16691],
+        [-0.05262, 0.16391, 0.14783],
+        [0.00000, 0.20514, 0.14122],
+        [0.05262, 0.16391, 0.14783],
+        [0.09656, 0.00880, 0.16691],
+        [-0.10108, -0.05920, 0.00731],
+        [-0.05471, -0.07545, -0.01389],
+        [0.00000, -0.07579, -0.01673],
+        [0.05471, -0.07545, -0.01389],
+        [0.10108, -0.05920, 0.00731],
     ],
     dtype=np.float64,
 )
@@ -76,22 +76,22 @@ _CANONICAL_MAP_INDICES = (
     30,
     31,
     35,
-    52,
+    48,
     62,
-    63,
-    55,
+    54,
+    59,
     66,
-    65,
+    55,
     1,
-    9,
-    8,
     7,
+    8,
+    9,
     15,
-    40,
-    42,
-    27,
+    36,
     39,
-    37,
+    27,
+    42,
+    45,
 )
 
 
@@ -460,28 +460,39 @@ def _estimate_head_pose_from_landmarks(
         ],
         dtype=np.float64,
     )
+    min_xy = image_points.min(axis=0)
+    max_xy = image_points.max(axis=0)
+    cx = float(0.5 * (min_xy[0] + max_xy[0]))
+    cy = float(0.5 * (min_xy[1] + max_xy[1]))
+    span = float(max(max_xy[0] - min_xy[0], max_xy[1] - min_xy[1], 1.0))
+    focal = span * 2.5
     camera_matrix = np.array(
-        [[640.0, 0.0, 320.0], [0.0, 640.0, 320.0], [0.0, 0.0, 1.0]],
+        [[focal, 0.0, cx], [0.0, focal, cy], [0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
+    rvec_init = np.zeros((3, 1), dtype=np.float64)
+    tvec_init = np.array([[0.0], [0.0], [1.0]], dtype=np.float64)
     ok, rotation_vector, _ = cv2.solvePnP(
         _CANONICAL_FACE_3D,
         image_points,
         camera_matrix,
         np.zeros((4, 1), dtype=np.float64),
+        rvec=rvec_init,
+        tvec=tvec_init,
+        useExtrinsicGuess=True,
         flags=cv2.SOLVEPNP_ITERATIVE,
     )
     if not ok:
         raise RuntimeError("Head-pose solvePnP failed")
     rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
-    sy = np.sqrt(rotation_matrix[0, 0] ** 2 + rotation_matrix[1, 0] ** 2)
+    sy = float(np.sqrt(rotation_matrix[0, 0] ** 2 + rotation_matrix[1, 0] ** 2))
     if sy >= 1e-6:
-        pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-        yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-        roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+        yaw = np.arctan2(-rotation_matrix[2, 0], sy)
+        pitch = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+        roll = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
     else:
-        pitch = np.arctan2(-rotation_matrix[2, 0], sy)
-        yaw = np.arctan2(-rotation_matrix[0, 1], rotation_matrix[1, 1])
+        yaw = np.arctan2(-rotation_matrix[2, 0], sy)
+        pitch = np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1])
         roll = 0.0
     return (
         float(np.degrees(yaw)),
