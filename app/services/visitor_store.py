@@ -18,6 +18,7 @@ import numpy as np
 
 from app import config
 from app.models.visitor import (
+    ClusterReviewResult,
     NameClusterResponse,
     VisitorClusterDetail,
     VisitorClusterSummary,
@@ -28,17 +29,18 @@ from app.services.centroid import insert_embeddings, recompute_member_centroid
 from app.services.face_engine import FaceEngine
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.minio_client import MinioClient
+from app.services.visitor_policy import (
+    CLOSED_STATUSES,
+    JOINABLE_STATUSES,
+    ReviewVerdict,
+    SightingGate,
+    centroid_moves_on_join,
+    review_error,
+    sighting_rejection,
+)
 
 logger = logging.getLogger(__name__)
 
-_UNNAMED_STATUSES = ("candidate", "surfaced", "dismissed")
-# Clusters eligible to absorb a new sighting: everything except 'named' (a
-# named cluster's biometric identity now belongs to a real member and must
-# not keep absorbing anonymous sightings). Dismissed clusters are included
-# deliberately: they keep absorbing matching sightings (so the same courier
-# does not resurface weekly as a new cluster) but the promotion check below
-# never flips a dismissed cluster back to 'surfaced'.
-_JOINABLE_STATUSES = _UNNAMED_STATUSES
 _RECENT_CROPS_LIMIT = 5
 _RECENT_SIGHTINGS_LIMIT = 20
 
@@ -70,6 +72,13 @@ class VisitorStore:
         self._unnamed_retention_days = int(config.get("visitors.unnamed_retention_days", 60))
         self._enroll_top_k = int(config.get("visitors.enroll_top_k", 5))
         self._recognition_threshold = float(config.get("recognition.threshold", 0.4))
+        self._gate = SightingGate(
+            min_detection_score=self._min_detection_score,
+            min_face_px=self._min_face_px,
+            max_member_similarity=self._recognition_threshold - self._member_margin,
+            min_face_quality=float(config.get("visitors.min_face_quality", 0.0)),
+            max_abs_yaw_deg=float(config.get("visitors.max_abs_yaw_deg", 180.0)),
+        )
 
     @property
     def clustering_enabled(self) -> bool:
@@ -95,19 +104,17 @@ class VisitorStore:
         if not self._clustering_enabled:
             return None
 
-        if face.det_score < self._min_detection_score:
-            metrics.visitor_sightings_rejected_total.labels(reason="low_detection_score").inc()
-            return None
-
         x1, y1, x2, y2 = face.bbox
-        if min(x2 - x1, y2 - y1) < self._min_face_px:
-            metrics.visitor_sightings_rejected_total.labels(reason="face_too_small").inc()
-            return None
-
-        # Fail closed: a borderline household match must never seed a visitor
-        # cluster (privacy/correctness gate, D7).
-        if identity.similarity >= (self._recognition_threshold - self._member_margin):
-            metrics.visitor_sightings_rejected_total.labels(reason="near_member").inc()
+        rejection = sighting_rejection(
+            self._gate,
+            det_score=face.det_score,
+            face_min_side_px=min(x2 - x1, y2 - y1),
+            member_similarity=identity.similarity,
+            quality_score=None if face.quality is None else face.quality.score,
+            yaw_deg=face.yaw_deg,
+        )
+        if rejection is not None:
+            metrics.visitor_sightings_rejected_total.labels(reason=rejection).inc()
             return None
 
         seen_at = seen_at or datetime.now(UTC)
@@ -158,10 +165,12 @@ class VisitorStore:
             cluster_id = best.cluster_id
             prev_count = best.sighting_count
             prev_centroid = best.centroid
+            joined_status = best.status
         else:
             cluster_id = str(uuid.uuid4())
             prev_count = 0
             prev_centroid = embedding
+            joined_status = "candidate"
             await conn.execute(
                 """INSERT INTO visitor_clusters
                        (cluster_id, status, centroid, sighting_count, distinct_days,
@@ -185,8 +194,11 @@ class VisitorStore:
         sighting_id = int(sighting_row["id"])
 
         new_count = prev_count + 1
-        new_centroid = (prev_centroid * prev_count + embedding) / new_count
-        new_centroid = new_centroid / np.linalg.norm(new_centroid)
+        if centroid_moves_on_join(joined_status):
+            new_centroid = (prev_centroid * prev_count + embedding) / new_count
+            new_centroid = new_centroid / np.linalg.norm(new_centroid)
+        else:
+            new_centroid = prev_centroid
 
         window_start = datetime.now(UTC) - timedelta(days=self._surface_window_days)
         distinct_days_row = await conn.fetchrow(
@@ -226,7 +238,7 @@ class VisitorStore:
             """SELECT cluster_id, centroid, sighting_count, status, first_seen_at, last_seen_at
                FROM visitor_clusters
                WHERE status = ANY($1::text[])""",
-            list(_JOINABLE_STATUSES),
+            list(JOINABLE_STATUSES),
         )
         return [
             _JoinableCluster(
@@ -332,6 +344,9 @@ class VisitorStore:
             status=row["status"],
             display_hint=row["display_hint"],
             named_person_id=row["named_person_id"],
+            attributed_person_id=row["attributed_person_id"],
+            reviewed_by=row["reviewed_by"],
+            reviewed_at=row["reviewed_at"],
             sighting_count=row["sighting_count"],
             distinct_days=row["distinct_days"],
             first_seen_at=row["first_seen_at"],
@@ -407,27 +422,60 @@ class VisitorStore:
             embedding_count=len(embeddings),
         )
 
-    async def dismiss_cluster(self, cluster_id: str) -> bool:
-        """Mark a cluster dismissed. Returns False if not found.
+    async def review_clusters(
+        self,
+        cluster_ids: list[str],
+        verdict: ReviewVerdict,
+        *,
+        actor: str,
+        person_id: str | None = None,
+    ) -> list[ClusterReviewResult]:
+        """Attribute clusters to an enrolled member, or dismiss them; one result per cluster.
 
-        Raises ValueError if the cluster is already named (a real member's
-        evidence cannot be dismissed)."""
+        Each cluster is reviewed in its own transaction, so one bad id never undoes the others.
+        Attribution closes a cluster as faces of ``person_id`` and records who decided; it never
+        adds an embedding to that member. A named cluster is final. Raises ValueError when
+        ``attribute`` has no ``person_id``.
+        """
+        if verdict == "attribute" and not person_id:
+            raise ValueError("attribute needs a person_id")
+        target = person_id if verdict == "attribute" else None
+        new_status = "attributed" if verdict == "attribute" else "dismissed"
+        results: list[ClusterReviewResult] = []
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT status FROM visitor_clusters WHERE cluster_id = $1", cluster_id
-            )
-            if row is None:
-                return False
-            if row["status"] == "named":
-                raise ValueError(f"cluster '{cluster_id}' is already named")
-
-            await conn.execute(
-                "UPDATE visitor_clusters SET status = 'dismissed', updated_at = now() "
-                "WHERE cluster_id = $1",
-                cluster_id,
-            )
-        await self._refresh_cluster_gauge()
-        return True
+            if target is not None and not await conn.fetchval(
+                "SELECT 1 FROM members WHERE person_id = $1", target
+            ):
+                return [
+                    ClusterReviewResult(cluster_id=cid, ok=False, error_code="unknown_member")
+                    for cid in cluster_ids
+                ]
+            for cluster_id in cluster_ids:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        "SELECT status FROM visitor_clusters WHERE cluster_id = $1 FOR UPDATE",
+                        cluster_id,
+                    )
+                    error = review_error(None if row is None else row["status"], verdict)
+                    if error is None:
+                        await conn.execute(
+                            """UPDATE visitor_clusters
+                               SET status = $2, attributed_person_id = $3, reviewed_by = $4,
+                                   reviewed_at = now(), updated_at = now()
+                               WHERE cluster_id = $1""",
+                            cluster_id,
+                            new_status,
+                            target,
+                            actor,
+                        )
+                results.append(
+                    ClusterReviewResult(cluster_id=cluster_id, ok=error is None, error_code=error)
+                )
+        reviewed = sum(1 for r in results if r.ok)
+        if reviewed:
+            metrics.visitor_clusters_reviewed_total.labels(verdict=verdict).inc(reviewed)
+            await self._refresh_cluster_gauge()
+        return results
 
     async def merge_clusters(self, cluster_a: str, cluster_b: str) -> VisitorClusterSummary:
         """Merge two clusters that represent the same physical visitor.
@@ -449,6 +497,9 @@ class VisitorStore:
                 raise LookupError("both clusters must exist to merge")
             if by_id[cluster_a]["status"] == "named" or by_id[cluster_b]["status"] == "named":
                 raise ValueError("cannot merge a named cluster")
+            # Two attributions may name different members; review them separately instead.
+            if "attributed" in (by_id[cluster_a]["status"], by_id[cluster_b]["status"]):
+                raise ValueError("cannot merge an attributed cluster")
 
             row_a, row_b = by_id[cluster_a], by_id[cluster_b]
             keep, other = (
@@ -519,14 +570,18 @@ class VisitorStore:
     async def purge_expired(self) -> int:
         """Delete unnamed clusters (and their sightings/crops) past retention.
 
-        Named clusters are exempt. Returns the number of clusters purged.
+        Any cluster not seen within the retention window is deleted whole. A reviewed cluster
+        that keeps absorbing sightings would never age out that way, so its individual sightings
+        older than the window are deleted too; its row and frozen centroid stay so it keeps
+        absorbing. Named clusters are exempt. Returns the number of clusters purged.
         """
         cutoff = datetime.now(UTC) - timedelta(days=self._unnamed_retention_days)
+        await self._purge_old_sightings_of_closed_clusters(cutoff)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT cluster_id FROM visitor_clusters
                    WHERE status = ANY($1::text[]) AND last_seen_at < $2""",
-                list(_UNNAMED_STATUSES),
+                list(JOINABLE_STATUSES),
                 cutoff,
             )
             cluster_ids = [str(r["cluster_id"]) for r in rows]
@@ -552,6 +607,34 @@ class VisitorStore:
             logger.info("Purged %d expired unnamed visitor clusters", len(cluster_ids))
             await self._refresh_cluster_gauge()
         return len(cluster_ids)
+
+    async def _purge_old_sightings_of_closed_clusters(self, cutoff: datetime) -> int:
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """DELETE FROM visitor_sightings s
+                   USING visitor_clusters c
+                   WHERE s.cluster_id = c.cluster_id AND c.status = ANY($1::text[])
+                     AND s.seen_at < $2
+                   RETURNING s.cluster_id, s.crop_object""",
+                list(CLOSED_STATUSES),
+                cutoff,
+            )
+            touched = {r["cluster_id"] for r in rows}
+            for cluster_id in touched:
+                await conn.execute(
+                    """UPDATE visitor_clusters SET sighting_count =
+                           (SELECT count(*) FROM visitor_sightings WHERE cluster_id = $1)
+                       WHERE cluster_id = $1""",
+                    cluster_id,
+                )
+        for r in rows:
+            if r["crop_object"] is None:
+                continue
+            try:
+                self._minio.delete_object(r["crop_object"])
+            except Exception:
+                logger.warning("Failed to delete visitor crop during purge: %s", r["crop_object"])
+        return len(rows)
 
     async def _refresh_cluster_gauge(self) -> None:
         async with self._pool.acquire() as conn:

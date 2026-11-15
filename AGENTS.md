@@ -242,6 +242,8 @@ Key settings:
 | `calibration_capture.unlabeled_retention_days` | -- | `30` | Unlabeled and rejected captures (and crops) purged after this |
 | `calibration_capture.queue_size` | -- | `64` | Background capture queue; a full queue drops the offer |
 | `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
+| `visitors.min_face_quality` | -- | `0.7` | Minimum face quality score for a visitor sighting (0.0 disables) |
+| `visitors.max_abs_yaw_deg` | -- | `30` | Maximum absolute head yaw for a visitor sighting (180 disables) |
 | `motion.min_displacement_fraction` | -- | `0.05` | Min displacement for movement |
 | `motion.cross_frame_similarity` | -- | `0.5` | Unknown-face cross-frame linking |
 | `database.dsn` | `DATABASE_URL` | -- | PostgreSQL connection string (required) |
@@ -356,20 +358,27 @@ Draws bounding boxes and labels on a copy of the input image:
 Manages the visitor clustering subsystem for recurring unknown visitors.
 
 **Tables:**
-- `visitor_clusters`: tracks `cluster_id`, `status` (`candidate`, `surfaced`, `named`, `dismissed`), `distinct_days`, and the running-mean centroid.
+- `visitor_clusters`: tracks `cluster_id`, `status` (`candidate`, `surfaced`, `named`, `dismissed`, `attributed`), `distinct_days`, the centroid, and for reviewed clusters `attributed_person_id`, `reviewed_by`, and `reviewed_at` (migration 0004).
 - `visitor_sightings`: hypertable for each observed face crop (MinIO key) and embedding.
 
 **Config keys (`config.visitors.*`):**
 - `clustering_enabled`: Master toggle.
-- `min_detection_score` (0.6), `min_face_px` (64): Quality gates.
+- `min_detection_score` (0.6), `min_face_px` (64): Detection and size gates.
+- `min_face_quality` (0.7 in settings; code default 0.0 disables) and `max_abs_yaw_deg` (30; code default 180 disables): a sighting needs a face quality score and a near-frontal pose. Faces no reviewer could judge split one person into many clusters. A face without a quality score is rejected. Rejections are counted in `pid_visitor_sightings_rejected_total{reason}`.
 - `member_margin` (0.05): Member-margin fail-closed rule. A borderline match against the household (similarity > recognition.threshold - member_margin) is explicitly rejected from visitor clustering to prevent a known member from seeding a visitor cluster.
 - `cluster_join_threshold` (0.55): Looser than recognition.
 - `surface_min_days` (3), `surface_window_days` (30): Promotion criteria.
 - `unnamed_retention_days` (60): Retention period.
 - `enroll_top_k` (5): Embeddings copied on naming.
 
+**Open and closed clusters** (pure policy in `app/services/visitor_policy.py`):
+`candidate` and `surfaced` clusters are open: their centroid is the running mean of their sightings. `dismissed` and `attributed` clusters are closed by an operator: they keep absorbing matching sightings (so the same face does not come back as a new cluster) but their centroid is frozen at review time, so they never widen toward faces nobody reviewed. `named` clusters absorb nothing.
+
+**Review without enrollment:**
+`POST /api/v1/visitors/clusters/review` attributes clusters to an existing, enrolled member (`attributed`) or dismisses them, per cluster, recording the actor. Attribution never adds an embedding to the member: it says whose faces these are and stops them surfacing. Any cluster except a named one can be reviewed again. Deleting a member reverts its attributed clusters to `candidate` in the same transaction (`PostgresEnrollmentRepository.remove_member`; the foreign key has no delete action, so a missed path fails). An attributed cluster cannot be merged.
+
 **Retention:**
-An async daily task deletes unnamed (`candidate`/`surfaced`/`dismissed`) clusters whose `last_seen_at` is older than `unnamed_retention_days` (60), including sightings and MinIO crops. Named clusters are exempt.
+An async daily task deletes clusters in any state but `named` whose `last_seen_at` is older than `unnamed_retention_days` (60), including sightings and MinIO crops. A closed cluster that keeps absorbing would never age out that way, so its individual sightings older than the window are deleted too, while the cluster row and frozen centroid stay. Named clusters are exempt.
 
 **Calibration captures are not enrollment:**
 `CalibrationCaptureService` (`app/services/calibration_capture.py`) samples faces from tracker `/identify` calls into `calibration_candidates` (migration 0003), capped per (quality decile, nearest identity or `none`, camera) per UTC day. Capture runs in a bounded background queue and never fails or slows `/identify`. A label never changes the gallery; labeled rows are read only by the offline `build-manifest` command. Unlabeled and rejected rows are purged after `unlabeled_retention_days` (30) with their crops.
@@ -445,7 +454,7 @@ Batch endpoint handles per-image errors gracefully: bad frames are skipped and t
 | `GET` | `/api/v1/visitors/clusters` | Cluster list (optional `status` filter); 409 when clustering is disabled |
 | `GET` | `/api/v1/visitors/clusters/{cluster_id}` | Cluster detail with recent sightings |
 | `POST` | `/api/v1/visitors/clusters/{cluster_id}/name` | Names the cluster into an enrolled member (the only privileged transition) |
-| `POST` | `/api/v1/visitors/clusters/{cluster_id}/dismiss` | Dismisses a cluster |
+| `POST` | `/api/v1/visitors/clusters/review` | Attributes clusters to an enrolled member, or dismisses them; per-cluster results, records the actor; never enrolls |
 | `POST` | `/api/v1/visitors/clusters/{cluster_a}/merge/{cluster_b}` | Merges two clusters |
 
 Calibration review (operator labeling of sampled faces; cognitive-companion proxies it and
@@ -516,7 +525,7 @@ Tables added on top of the core tables:
 
 | Table | Type | Purpose |
 | --- | --- | --- |
-| `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed) and running centroid |
+| `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed, attributed), centroid, and review record |
 | `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
 | `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003) |
 
@@ -569,7 +578,7 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_visitor_policy.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
 
 ### Fixtures
 

@@ -17,11 +17,12 @@ from fastapi import HTTPException
 from pgvector.asyncpg import register_vector
 
 from app.db.migrate import run_migrations
-from app.models.visitor import NameClusterRequest
+from app.models.visitor import NameClusterRequest, ReviewClustersRequest
 from app.routers import visitors
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
 from tests.db import safe_test_dsn
+from tests.visitor_faces import visitor_face
 
 TEST_DSN = safe_test_dsn()
 
@@ -68,7 +69,7 @@ def _embedding(seed: int) -> np.ndarray:
 
 
 def _face(embedding: np.ndarray) -> DetectedFace:
-    return DetectedFace(bbox=[10.0, 20.0, 110.0, 140.0], embedding=embedding, det_score=0.95)
+    return visitor_face(embedding)
 
 
 def _unknown_identity() -> IdentifyResult:
@@ -180,17 +181,29 @@ class TestNaming:
 
 
 class TestDismissAndMerge:
-    async def test_dismiss(self, store, request_):
+    async def test_review_dismisses_and_reports_each_cluster(self, store, request_):
         cluster_id = await store.record_sighting(
             np.zeros((200, 200, 3), dtype=np.uint8), _face(_embedding(5)), _unknown_identity()
         )
-        result = await visitors.dismiss_cluster(request_, cluster_id)
-        assert result["status"] == "dismissed"
+        missing = "00000000-0000-0000-0000-000000000000"
 
-    async def test_dismiss_missing_404(self, request_):
+        result = await visitors.review_clusters(
+            request_,
+            ReviewClustersRequest(cluster_ids=[cluster_id, missing], verdict="dismiss", actor="a"),
+        )
+
+        assert (result.reviewed, result.failed) == (1, 1)
+        assert [(r.cluster_id, r.ok, r.error_code) for r in result.results] == [
+            (cluster_id, True, None),
+            (missing, False, "not_found"),
+        ]
+
+    async def test_review_attribute_without_member_is_422(self, request_):
         with pytest.raises(HTTPException) as exc_info:
-            await visitors.dismiss_cluster(request_, "00000000-0000-0000-0000-000000000000")
-        assert exc_info.value.status_code == 404
+            await visitors.review_clusters(
+                request_, ReviewClustersRequest(cluster_ids=["x"], verdict="attribute", actor="a")
+            )
+        assert exc_info.value.status_code == 422
 
     async def test_merge_recomputes_centroid(self, store, request_):
         emb_a = _embedding(6)
@@ -221,7 +234,10 @@ class TestDisabledFlag:
         assert listing.clusters == []
 
         with pytest.raises(HTTPException) as exc_info:
-            await visitors.dismiss_cluster(request_, cluster_id)
+            await visitors.review_clusters(
+                request_,
+                ReviewClustersRequest(cluster_ids=[cluster_id], verdict="dismiss", actor="a"),
+            )
         assert exc_info.value.status_code == 409
 
         with pytest.raises(HTTPException) as exc_info:

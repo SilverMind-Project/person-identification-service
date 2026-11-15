@@ -166,7 +166,17 @@ class PostgresEnrollmentRepository:
         return _member_info(row) if row else None
 
     async def remove_member(self, person_id: str) -> bool:
-        async with self._pool.acquire() as conn:
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Visitor clusters attributed to this member lose their label and become unreviewed
+            # again: the person they were judged to be no longer exists. The foreign key has no
+            # delete action, so the DELETE below fails if this step is ever skipped.
+            await conn.execute(
+                """UPDATE visitor_clusters
+                   SET status = 'candidate', attributed_person_id = NULL, reviewed_by = NULL,
+                       reviewed_at = NULL, updated_at = now()
+                   WHERE attributed_person_id = $1""",
+                person_id,
+            )
             # ON DELETE CASCADE removes the member's embeddings and centroid.
             result = await conn.execute("DELETE FROM members WHERE person_id = $1", person_id)
         return bool(result != "DELETE 0")

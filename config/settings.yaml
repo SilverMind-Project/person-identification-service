@@ -156,6 +156,13 @@ visitors:
   surface_window_days: 30
   unnamed_retention_days: 60
   enroll_top_k: 5
+  # A sighting needs a face quality score (0-1, face_quality.py) of at least this, and an
+  # absolute head yaw (degrees) of at most max_abs_yaw_deg. Faces below them are ones no reviewer
+  # could judge; they split one person into many clusters. Measured over 7 days (2026-11-15):
+  # of 7,340 sightings that passed the other gates, 1,891 pass 0.7 and 30 degrees. Code defaults
+  # 0.0 and 180 disable both checks.
+  min_face_quality: 0.7
+  max_abs_yaw_deg: 30
 
 # Logging
 # Override: LOG_LEVEL=DEBUG

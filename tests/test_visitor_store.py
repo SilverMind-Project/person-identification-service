@@ -14,12 +14,15 @@ import pytest_asyncio
 from pgvector.asyncpg import register_vector
 
 from app.db.migrate import run_migrations
+from app.observability import metrics
+from app.services.centroid import insert_embeddings, recompute_member_centroid
 from app.services.enrollment_repository import PostgresEnrollmentRepository
 from app.services.enrollment_store import EnrollmentStore
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
 from tests.db import safe_test_dsn
 from tests.gallery import DEFAULT_THRESHOLDS
+from tests.visitor_faces import face_quality, visitor_face
 
 TEST_DSN = safe_test_dsn()
 
@@ -79,12 +82,8 @@ def _embedding_at_similarity(ref: np.ndarray, target_sim: float, seed: int = 7) 
     return (result / np.linalg.norm(result)).astype(np.float32)
 
 
-def _face(embedding: np.ndarray, det_score: float = 0.95, bbox=None) -> DetectedFace:
-    return DetectedFace(
-        bbox=bbox or [10.0, 20.0, 110.0, 140.0],
-        embedding=embedding,
-        det_score=det_score,
-    )
+def _face(embedding: np.ndarray, det_score: float = 0.95, bbox=None, **kwargs) -> DetectedFace:
+    return visitor_face(embedding, det_score=det_score, bbox=bbox, **kwargs)
 
 
 def _unknown_identity(
@@ -290,7 +289,8 @@ class TestDismissAndRetention:
         cluster_id = await store.record_sighting(
             np.zeros((200, 200, 3), dtype=np.uint8), _face(base), _unknown_identity(), seen_at=now
         )
-        assert await store.dismiss_cluster(cluster_id) is True
+        [result] = await store.review_clusters([cluster_id], "dismiss", actor="Caregiver")
+        assert result.ok
 
         # Further matching sightings still absorb into the dismissed cluster...
         for days_ago in (2, 1):
@@ -495,3 +495,215 @@ class TestMilestoneCompletionCriterion:
         identified = await enrollment_store.identify(nurse_base)
         assert identified.person_id == "nurse-priya"
         assert identified.recognition_state == "recognized"
+
+
+def _rejected(reason: str) -> float:
+    return metrics.visitor_sightings_rejected_total.labels(reason=reason)._value.get()
+
+
+async def _member(pool, person_id: str, seed: int) -> np.ndarray:
+    """Enroll one member with one embedding through the real store; return the embedding."""
+    emb = _embedding(seed)
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO members (person_id, name) VALUES ($1, $2)", person_id, person_id.title()
+        )
+        await insert_embeddings(conn, person_id, [emb])
+        await recompute_member_centroid(conn, person_id)
+    return emb
+
+
+async def _enrollment_state(pool, person_id: str):
+    async with pool.acquire() as conn:
+        embeddings = await conn.fetch(
+            "SELECT embedding::text AS e FROM embeddings WHERE person_id = $1 ORDER BY 1", person_id
+        )
+        centroid = await conn.fetchval(
+            "SELECT centroid::text FROM centroids WHERE person_id = $1", person_id
+        )
+    return [r["e"] for r in embeddings], centroid
+
+
+async def _sight(store, emb, *, seen_at=None, **face_kwargs):
+    return await store.record_sighting(
+        np.zeros((200, 200, 3), dtype=np.uint8),
+        _face(emb, **face_kwargs),
+        _unknown_identity(),
+        seen_at=seen_at or datetime.now(UTC),
+    )
+
+
+class TestQualityGate:
+    async def test_low_quality_oblique_and_unscored_faces_are_rejected_by_reason(self, store, pool):
+        before = {
+            r: _rejected(r) for r in ("low_face_quality", "pose_too_oblique", "no_quality_score")
+        }
+
+        assert await _sight(store, _embedding(80), quality=face_quality(0.69)) is None
+        assert await _sight(store, _embedding(81), yaw_deg=-31.0) is None
+        assert await _sight(store, _embedding(82), quality=None) is None
+
+        assert _rejected("low_face_quality") == before["low_face_quality"] + 1
+        assert _rejected("pose_too_oblique") == before["pose_too_oblique"] + 1
+        assert _rejected("no_quality_score") == before["no_quality_score"] + 1
+        assert await _cluster_rows(pool) == []
+
+    async def test_a_face_at_the_thresholds_is_stored(self, store, pool):
+        assert (
+            await _sight(store, _embedding(83), quality=face_quality(0.7), yaw_deg=30.0) is not None
+        )
+
+
+class TestReview:
+    async def test_attribution_closes_the_cluster_and_never_touches_enrollment(self, store, pool):
+        await _member(pool, "resident", seed=90)
+        before = await _enrollment_state(pool, "resident")
+        cluster_id = await _sight(store, _embedding(91))
+
+        [result] = await store.review_clusters(
+            [cluster_id], "attribute", actor="Caregiver", person_id="resident"
+        )
+
+        assert (result.ok, result.error_code) == (True, None)
+        assert await _enrollment_state(pool, "resident") == before
+        [row] = await _cluster_rows(pool)
+        assert row["status"] == "attributed"
+        assert row["attributed_person_id"] == "resident"
+        assert row["reviewed_by"] == "Caregiver"
+        assert row["reviewed_at"] is not None
+
+    async def test_attributed_cluster_absorbs_without_moving_its_centroid(self, store, pool):
+        await _member(pool, "resident", seed=92)
+        base = _embedding(93)
+        cluster_id = await _sight(store, base)
+        await store.review_clusters([cluster_id], "attribute", actor="a", person_id="resident")
+        async with pool.acquire() as conn:
+            frozen = await conn.fetchval(
+                "SELECT centroid::text FROM visitor_clusters WHERE cluster_id = $1", cluster_id
+            )
+
+        for seed in (94, 95, 96):
+            joined = await _sight(store, _embedding_at_similarity(base, 0.8, seed=seed))
+            assert joined == cluster_id
+
+        [row] = await _cluster_rows(pool)
+        assert row["sighting_count"] == 4
+        assert row["status"] == "attributed"
+        async with pool.acquire() as conn:
+            after = await conn.fetchval(
+                "SELECT centroid::text FROM visitor_clusters WHERE cluster_id = $1", cluster_id
+            )
+        assert after == frozen
+
+    async def test_open_cluster_centroid_still_follows_its_sightings(self, store, pool):
+        base = _embedding(97)
+        cluster_id = await _sight(store, base)
+        async with pool.acquire() as conn:
+            first = await conn.fetchval(
+                "SELECT centroid::text FROM visitor_clusters WHERE cluster_id = $1", cluster_id
+            )
+        await _sight(store, _embedding_at_similarity(base, 0.8, seed=98))
+        async with pool.acquire() as conn:
+            second = await conn.fetchval(
+                "SELECT centroid::text FROM visitor_clusters WHERE cluster_id = $1", cluster_id
+            )
+        assert second != first
+
+    async def test_batch_reports_each_cluster_and_named_is_final(self, store, pool):
+        await _member(pool, "resident", seed=100)
+        open_id = await _sight(store, _embedding(101))
+        named_id = await _sight(store, _embedding(102))
+        await store.name_cluster(named_id, "visitor-one", "Visitor One")
+        missing_id = "00000000-0000-0000-0000-000000000000"
+
+        results = await store.review_clusters(
+            [open_id, named_id, missing_id], "attribute", actor="a", person_id="resident"
+        )
+
+        assert [(r.cluster_id, r.ok, r.error_code) for r in results] == [
+            (open_id, True, None),
+            (named_id, False, "already_named"),
+            (missing_id, False, "not_found"),
+        ]
+
+    async def test_unknown_member_attributes_nothing(self, store, pool):
+        cluster_id = await _sight(store, _embedding(103))
+
+        [result] = await store.review_clusters(
+            [cluster_id], "attribute", actor="a", person_id="nobody"
+        )
+
+        assert (result.ok, result.error_code) == (False, "unknown_member")
+        [row] = await _cluster_rows(pool)
+        assert row["status"] == "candidate"
+
+    async def test_a_review_can_be_corrected(self, store, pool):
+        await _member(pool, "resident", seed=104)
+        cluster_id = await _sight(store, _embedding(105))
+        await store.review_clusters([cluster_id], "attribute", actor="a", person_id="resident")
+
+        [result] = await store.review_clusters([cluster_id], "dismiss", actor="b")
+
+        assert result.ok
+        [row] = await _cluster_rows(pool)
+        assert (row["status"], row["attributed_person_id"], row["reviewed_by"]) == (
+            "dismissed",
+            None,
+            "b",
+        )
+
+    async def test_attribute_without_member_is_a_programming_error(self, store):
+        with pytest.raises(ValueError, match="person_id"):
+            await store.review_clusters(["x"], "attribute", actor="a")
+
+    async def test_attributed_cluster_cannot_be_merged(self, store, pool):
+        await _member(pool, "resident", seed=106)
+        a = await _sight(store, _embedding(107))
+        b = await _sight(store, _embedding(108))
+        await store.review_clusters([a], "attribute", actor="x", person_id="resident")
+
+        with pytest.raises(ValueError, match="attributed"):
+            await store.merge_clusters(a, b)
+
+    async def test_deleting_the_member_reverts_its_attributions(self, store, pool):
+        await _member(pool, "resident", seed=109)
+        cluster_id = await _sight(store, _embedding(110))
+        await store.review_clusters([cluster_id], "attribute", actor="x", person_id="resident")
+
+        removed = await PostgresEnrollmentRepository(pool).remove_member("resident")
+
+        assert removed is True
+        [row] = await _cluster_rows(pool)
+        assert (row["status"], row["attributed_person_id"], row["reviewed_by"]) == (
+            "candidate",
+            None,
+            None,
+        )
+
+
+class TestClosedClusterRetention:
+    async def test_old_sightings_of_a_closed_cluster_are_purged_but_it_keeps_absorbing(
+        self, store, pool, minio
+    ):
+        await _member(pool, "resident", seed=111)
+        now = datetime.now(UTC)
+        base = _embedding(112)
+        cluster_id = await _sight(store, base, seen_at=now - timedelta(days=90))
+        for seed, days_ago in ((113, 80), (114, 1)):
+            await _sight(
+                store,
+                _embedding_at_similarity(base, 0.85, seed=seed),
+                seen_at=now - timedelta(days=days_ago),
+            )
+        await store.review_clusters([cluster_id], "attribute", actor="x", person_id="resident")
+        assert len(minio.uploads) == 3
+
+        purged_clusters = await store.purge_expired()
+
+        assert purged_clusters == 0
+        sightings = await _sighting_rows(pool, cluster_id)
+        assert len(sightings) == 1
+        assert len(minio.uploads) == 1
+        [row] = await _cluster_rows(pool)
+        assert row["sighting_count"] == 1
+        assert row["status"] == "attributed"

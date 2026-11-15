@@ -18,6 +18,7 @@ from app.routers.identification import _ingest_unknown_faces
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.visitor_store import VisitorStore
 from tests.db import safe_test_dsn
+from tests.visitor_faces import visitor_face
 
 TEST_DSN = safe_test_dsn()
 
@@ -59,7 +60,7 @@ def _embedding(seed: int) -> np.ndarray:
 
 
 def _face(embedding: np.ndarray) -> DetectedFace:
-    return DetectedFace(bbox=[10.0, 20.0, 110.0, 140.0], embedding=embedding, det_score=0.95)
+    return visitor_face(embedding)
 
 
 def _identity(person_id: str, similarity: float = 0.1) -> IdentifyResult:

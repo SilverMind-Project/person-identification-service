@@ -49,6 +49,12 @@ visitor_clusters_total = Gauge(
     ["status"],
 )
 
+visitor_clusters_reviewed_total = Counter(
+    "pid_visitor_clusters_reviewed_total",
+    "Visitor clusters an operator attributed to an enrolled member or dismissed, by verdict.",
+    ["verdict"],
+)
+
 visitor_clusters_purged_total = Counter(
     "pid_visitor_clusters_purged_total",
     "Unnamed visitor clusters deleted by the retention job.",

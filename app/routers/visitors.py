@@ -17,6 +17,8 @@ from fastapi import APIRouter, HTTPException, Request
 from app.models.visitor import (
     NameClusterRequest,
     NameClusterResponse,
+    ReviewClustersRequest,
+    ReviewClustersResponse,
     VisitorClusterDetail,
     VisitorClusterListResponse,
 )
@@ -75,19 +77,31 @@ async def name_cluster(request: Request, cluster_id: str, body: NameClusterReque
     return result
 
 
-@router.post("/clusters/{cluster_id}/dismiss")
-async def dismiss_cluster(request: Request, cluster_id: str):
+@router.post("/clusters/review", response_model=ReviewClustersResponse)
+async def review_clusters(request: Request, body: ReviewClustersRequest):
+    """Attribute clusters to an enrolled member, or dismiss them.
+
+    Writes cluster review state only; never adds an embedding to any member. Per-cluster
+    results: a missing or named cluster fails alone. 422 when ``attribute`` has no member.
+    """
     store = request.app.state.visitor_store
     _require_enabled(store)
+    if body.verdict == "attribute" and body.person_id is None:
+        raise HTTPException(status_code=422, detail="attribute needs a person_id")
 
-    try:
-        found = await store.dismiss_cluster(cluster_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    if not found:
-        raise HTTPException(status_code=404, detail=f"Cluster '{cluster_id}' not found")
-    return {"cluster_id": cluster_id, "status": "dismissed"}
+    results = await store.review_clusters(
+        body.cluster_ids, body.verdict, actor=body.actor, person_id=body.person_id
+    )
+    reviewed = sum(1 for r in results if r.ok)
+    logger.info(
+        "POST /visitors/clusters/review verdict=%s reviewed=%d failed=%d",
+        body.verdict,
+        reviewed,
+        len(results) - reviewed,
+    )
+    return ReviewClustersResponse(
+        results=results, reviewed=reviewed, failed=len(results) - reviewed
+    )
 
 
 @router.post("/clusters/{cluster_a}/merge/{cluster_b}")
