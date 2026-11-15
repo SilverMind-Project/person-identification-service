@@ -148,6 +148,39 @@ def test_label_rules(client: TestClient) -> None:
     assert len(unlabeled["candidates"]) == 4
 
 
+def test_label_batch_labels_each_and_reports_missing_ones(client: TestClient) -> None:
+    ids = [str(uuid.UUID(int=1)), str(uuid.UUID(int=99)), str(uuid.UUID(int=2))]
+    response = client.post(
+        "/api/v1/calibration/candidates/label-batch",
+        json={"candidate_ids": ids, "label_kind": "not_enrolled", "labeled_by": "operator"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [(r["candidate_id"], r["ok"], r["error_code"]) for r in body["results"]] == [
+        (ids[0], True, None),
+        (ids[1], False, "not_found"),
+        (ids[2], True, None),
+    ]
+    assert (body["labeled"], body["failed"]) == (2, 1)
+    labeled = client.get("/api/v1/calibration/candidates", params={"state": "labeled"}).json()
+    assert {(c["label_kind"], c["labeled_by"]) for c in labeled["candidates"]} == {
+        ("not_enrolled", "operator")
+    }
+
+
+def test_label_batch_refuses_member_labels(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/calibration/candidates/label-batch",
+        json={
+            "candidate_ids": [str(uuid.UUID(int=1))],
+            "label_kind": "member",
+            "labeled_by": "operator",
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_reject_and_delete(client: TestClient, crops: InMemoryCropStore) -> None:
     rejected = client.post(f"/api/v1/calibration/candidates/{uuid.UUID(int=2)}/reject")
     assert rejected.json()["label_state"] == "rejected"

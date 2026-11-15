@@ -48,6 +48,33 @@ class LabelRequest(BaseModel):
         return self
 
 
+class LabelBatchRequest(BaseModel):
+    """Label several candidates at once, only with labels that name nobody.
+
+    A member label asserts whose face this is and becomes a genuine pair in the calibration fit,
+    so it is given one face at a time, after looking at that face; a batch of them would put
+    unreviewed labels straight into the fit.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    candidate_ids: list[str] = Field(..., min_length=1, max_length=200)
+    label_kind: Literal["not_enrolled", "not_a_face"]
+    labeled_by: str = Field(..., min_length=1, max_length=128)
+
+
+class LabelBatchResult(BaseModel):
+    candidate_id: str
+    ok: bool
+    error_code: Literal["not_found"] | None = None
+
+
+class LabelBatchResponse(BaseModel):
+    results: list[LabelBatchResult] = Field(description="One result per candidate, in order")
+    labeled: int
+    failed: int
+
+
 class IdentityProgress(BaseModel):
     identity_id: str
     labeled_faces: int

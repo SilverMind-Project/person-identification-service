@@ -71,7 +71,7 @@ person-identification-service/
 │   │   ├── identification.py # POST /identify, POST /identify-batch
 │   │   ├── motion.py        # POST /detect-motion
 │   │   ├── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
-│   │   └── calibration.py   # /calibration/candidates list, label, reject, delete; /calibration/summary
+│   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete; /calibration/summary
 │   └── services/
 │       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
@@ -464,6 +464,7 @@ presigns the crop keys):
 | --- | --- | --- |
 | `GET` | `/api/v1/calibration/candidates` | Calibration captures, newest first (`state`, `limit`, `cursor`) |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/label` | Label a capture: member, not enrolled, or not a face |
+| `POST` | `/api/v1/calibration/candidates/label-batch` | Label several captures `not_enrolled` or `not_a_face`, one result each; member labels are refused (one face at a time) |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable (purged with unlabeled ones) |
 | `DELETE` | `/api/v1/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
 | `GET` | `/api/v1/calibration/summary` | Labeling progress per identity, kind, quality decile, camera |

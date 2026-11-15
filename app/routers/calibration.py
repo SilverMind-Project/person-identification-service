@@ -20,6 +20,9 @@ from app.models.calibration_review import (
     CandidateListResponse,
     CandidateView,
     IdentityProgress,
+    LabelBatchRequest,
+    LabelBatchResponse,
+    LabelBatchResult,
     LabelRequest,
 )
 from app.services.calibration_candidates import CalibrationCandidate, quality_decile
@@ -93,6 +96,35 @@ async def label_candidate(request: Request, candidate_id: str, body: LabelReques
     if updated is None:
         raise HTTPException(status_code=404, detail="candidate not found")
     return _view(updated)
+
+
+@router.post("/candidates/label-batch", response_model=LabelBatchResponse)
+async def label_candidates(request: Request, body: LabelBatchRequest) -> LabelBatchResponse:
+    """Label several candidates as someone not enrolled, or not a face; one result each.
+
+    Each label is its own write, so one missing candidate never undoes the others.
+    """
+    repo = request.app.state.calibration_candidates
+    labeled_at = datetime.now(UTC)
+    results: list[LabelBatchResult] = []
+    for candidate_id in body.candidate_ids:
+        updated = await repo.label(
+            candidate_id,
+            kind=body.label_kind,
+            identity_id=None,
+            source="operator_reviewed",
+            labeled_by=body.labeled_by,
+            labeled_at=labeled_at,
+        )
+        results.append(
+            LabelBatchResult(
+                candidate_id=candidate_id,
+                ok=updated is not None,
+                error_code=None if updated is not None else "not_found",
+            )
+        )
+    labeled = sum(1 for r in results if r.ok)
+    return LabelBatchResponse(results=results, labeled=labeled, failed=len(results) - labeled)
 
 
 @router.post("/candidates/{candidate_id}/reject", response_model=CandidateView)
