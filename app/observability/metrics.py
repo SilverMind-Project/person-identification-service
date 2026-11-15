@@ -43,6 +43,14 @@ visitor_sightings_rejected_total = Counter(
     ["reason"],
 )
 
+visitor_sightings_absorbed_total = Counter(
+    "pid_visitor_sightings_absorbed_total",
+    "Sightings that joined a reviewed (dismissed or attributed) cluster, by its status. Such a "
+    "sighting is never shown for review, so a rising rate is the signal that a reviewed cluster "
+    "is swallowing a face it was not reviewed for.",
+    ["status"],
+)
+
 visitor_clusters_total = Gauge(
     "pid_visitor_clusters_total",
     "Visitor clusters currently in each status.",

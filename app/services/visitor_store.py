@@ -121,11 +121,13 @@ class VisitorStore:
         embedding = np.asarray(face.embedding, dtype=np.float32)
 
         async with self._pool.acquire() as conn, conn.transaction():
-            cluster_id, sighting_id = await self._assign_and_insert(
+            cluster_id, sighting_id, joined_status = await self._assign_and_insert(
                 conn, embedding, float(face.det_score), seen_at, source
             )
 
         metrics.visitor_sightings_recorded_total.inc()
+        if joined_status in CLOSED_STATUSES:
+            metrics.visitor_sightings_absorbed_total.labels(status=joined_status).inc()
         await self._refresh_cluster_gauge()
 
         crop_object = self._crop_and_upload(image, face.bbox, cluster_id, sighting_id)
@@ -146,10 +148,10 @@ class VisitorStore:
         quality: float,
         seen_at: datetime,
         source: str,
-    ) -> tuple[str, int]:
-        """Join an existing open cluster or create a new one; insert the sighting.
+    ) -> tuple[str, int, str]:
+        """Join an existing joinable cluster or create a new one; insert the sighting.
 
-        Returns (cluster_id, sighting_id).
+        Returns (cluster_id, sighting_id, the joined cluster's status before this sighting).
         """
         open_clusters = await self._load_joinable_clusters(conn)
 
@@ -231,7 +233,7 @@ class VisitorStore:
             self._surface_min_days,
         )
 
-        return cluster_id, sighting_id
+        return cluster_id, sighting_id, joined_status
 
     async def _load_joinable_clusters(self, conn: asyncpg.Connection) -> list[_JoinableCluster]:
         rows = await conn.fetch(

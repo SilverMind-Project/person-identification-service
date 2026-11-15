@@ -501,6 +501,10 @@ def _rejected(reason: str) -> float:
     return metrics.visitor_sightings_rejected_total.labels(reason=reason)._value.get()
 
 
+def _absorbed(status: str) -> float:
+    return metrics.visitor_sightings_absorbed_total.labels(status=status)._value.get()
+
+
 async def _member(pool, person_id: str, seed: int) -> np.ndarray:
     """Enroll one member with one embedding through the real store; return the embedding."""
     emb = _embedding(seed)
@@ -582,9 +586,14 @@ class TestReview:
                 "SELECT centroid::text FROM visitor_clusters WHERE cluster_id = $1", cluster_id
             )
 
+        absorbed_before = _absorbed("attributed")
+        open_before = _absorbed("candidate")
         for seed in (94, 95, 96):
             joined = await _sight(store, _embedding_at_similarity(base, 0.8, seed=seed))
             assert joined == cluster_id
+        # Every quiet join into a reviewed cluster is counted, so drift can be watched.
+        assert _absorbed("attributed") - absorbed_before == 3
+        assert _absorbed("candidate") == open_before
 
         [row] = await _cluster_rows(pool)
         assert row["sighting_count"] == 4
