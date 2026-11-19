@@ -111,6 +111,10 @@ class CalibrationCandidateRepository(Protocol):
         """Delete a candidate; returns its crop key, or None when it did not exist."""
         ...
 
+    async def delete_for_person(self, person_id: str) -> list[str]:
+        """Delete candidates labeled as ``person_id`` or unlabeled with ``person_id`` as nearest."""
+        ...
+
     async def purge(self, captured_before: datetime) -> list[str]:
         """Delete unlabeled and rejected candidates captured before the cutoff; returns crop keys."""
         ...
@@ -292,6 +296,17 @@ class PostgresCalibrationCandidateRepository:
             )
         return None if key is None else str(key)
 
+    async def delete_for_person(self, person_id: str) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """DELETE FROM calibration_candidates
+                   WHERE label_identity_id = $1
+                      OR (nearest_person_id = $1 AND label_state = 'unlabeled')
+                   RETURNING crop_object_key""",
+                person_id,
+            )
+        return sorted(str(r["crop_object_key"]) for r in rows)
+
     async def purge(self, captured_before: datetime) -> list[str]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -406,6 +421,17 @@ class InMemoryCalibrationCandidateRepository:
     async def delete(self, candidate_id: str) -> str | None:
         removed = self._rows.pop(candidate_id, None)
         return None if removed is None else removed.crop_object_key
+
+    async def delete_for_person(self, person_id: str) -> list[str]:
+        matching = [
+            c
+            for c in self._rows.values()
+            if c.label_identity_id == person_id
+            or (c.nearest_person_id == person_id and c.label_state == "unlabeled")
+        ]
+        for c in matching:
+            del self._rows[c.candidate_id]
+        return sorted(c.crop_object_key for c in matching)
 
     async def purge(self, captured_before: datetime) -> list[str]:
         expired = [

@@ -191,6 +191,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         expected_quality_version=args.quality_version or "",
         expected_calibration_profile=args.calibration_profile,
         expected_aggregation=QualityWeightedMeanAggregator.version if template else None,
+        expected_gallery_representation=args.gallery_representation,
     )
     state = evaluator.health()
     print(f"calibration_health: {state}")
@@ -200,6 +201,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     print(f"preprocessing:      {evaluator.preprocessing_version()}")
     if evaluator.quality_version():
         print(f"calibration_profile: {evaluator.calibration_profile()}")
+        print(f"gallery_representation: {evaluator.gallery_representation()}")
         print(f"quality_version:    {evaluator.quality_version()}")
         print(f"covered_identities: {', '.join(evaluator.covered_identities() or []) or '(none)'}")
 
@@ -228,6 +230,7 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     )
     from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
     from app.services.enrollment_repository import PostgresEnrollmentRepository
+    from app.services.prototype_builder import PrototypePolicy
     from app.services.template_aggregation import QualityWeightedMeanAggregator
 
     dsn = config.get("database.dsn")
@@ -248,12 +251,36 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     )
     try:
         candidates = await PostgresCalibrationCandidateRepository(pool).list_labeled()
-        embeddings = await PostgresEnrollmentRepository(pool).member_embeddings()
+        repo = PostgresEnrollmentRepository(pool)
+        embedding_records = await repo.member_embedding_records()
+        gallery_revisions = await repo.get_gallery_revisions()
     finally:
         await pool.close()
 
-    meta = ManifestMeta()
-    gallery = {pid: [GalleryEmbedding(e) for e in rows] for pid, rows in embeddings.items()}
+    proto_cfg = config.get("prototypes", {}) or {}
+    prototype_policy = PrototypePolicy(
+        min_members_per_bin=int(proto_cfg.get("min_members_per_bin", 3)),
+        max_per_bin=int(proto_cfg.get("max_per_bin", 6)),
+        missing_quality_weight=float(proto_cfg.get("missing_quality_weight", 0.5)),
+        expected_quality_version=str(config.get("face_quality.scorer", "heuristic-v1")),
+        min_promotion_quality=float(proto_cfg.get("min_promotion_quality", 0.5)),
+        min_promotion_interocular_px=float(proto_cfg.get("min_promotion_interocular_px", 24.0)),
+    )
+    meta = ManifestMeta(gallery_representation=args.gallery, gallery_revisions=gallery_revisions)
+    gallery = {
+        pid: [
+            GalleryEmbedding(
+                embedding=rec.embedding,
+                source_candidate_id=rec.source_candidate_id,
+                pose_bin=rec.pose_bin,
+                source=rec.source,
+                quality_score=rec.quality_score,
+                quality_version=rec.quality_version,
+            )
+            for rec in rows
+        ]
+        for pid, rows in embedding_records.items()
+    }
     try:
         if args.profile == "template":
             if args.external:
@@ -269,10 +296,17 @@ async def _build_manifest(args: argparse.Namespace) -> int:
                 aggregator=QualityWeightedMeanAggregator(),
                 max_per_episode=args.max_records_per_episode,
                 random_seed=args.random_seed,
+                gallery_representation=args.gallery,
+                prototype_policy=prototype_policy,
             )
         else:
             records = household_records(
-                candidates, gallery, episode_gap_s=args.episode_gap_s, meta=meta
+                candidates,
+                gallery,
+                episode_gap_s=args.episode_gap_s,
+                meta=meta,
+                gallery_representation=args.gallery,
+                prototype_policy=prototype_policy,
             )
         if args.external:
             entries, licence = load_external_listing(Path(args.external))
@@ -431,6 +465,13 @@ def main(argv: list[str] | None = None) -> int:
         default="single_frame",
         help="the profile the service will load the artifact for",
     )
+    p_val.add_argument(
+        "--gallery-representation",
+        dest="gallery_representation",
+        choices=("centroid", "prototypes-v1"),
+        default="centroid",
+        help="the gallery representation the service will load the artifact for",
+    )
 
     # -- build-manifest --
     p_manifest = sub.add_parser("build-manifest", help="Build a v2 score manifest from labels")
@@ -442,6 +483,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=("single_frame", "template"),
         default="single_frame",
         help="single faces, or templates of 2 to 8 faces drawn within one episode",
+    )
+    p_manifest.add_argument(
+        "--gallery",
+        choices=("centroid", "prototypes-v1"),
+        default="centroid",
+        help="gallery representation to score probes against",
     )
     p_manifest.add_argument(
         "--max-records-per-episode",

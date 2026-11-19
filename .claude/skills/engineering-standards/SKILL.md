@@ -72,8 +72,25 @@ Rules:
   `app/services/template_aggregation.py`) for a later `/match-template` call. They are biometric
   data; every consumer must hold them in memory only and never log or persist them.
 - `/match-template` follows the store pattern: `TemplateMatchService` (no SQL) sequences the
-  `TemplateAggregator`, `EnrollmentRepository.nearest_centroids(k=2)`, and `classify_match` with
-  its own `MatchThresholds`; it has no side effects.
+  `TemplateAggregator`, `EnrollmentRepository.nearest_centroids(k=2)` or
+  `nearest_identities(k=2)` (under `recognition.gallery_representation`), and `classify_match`
+  with its own `MatchThresholds`; it has no side effects.
+- Multi-prototype matching (`app/services/prototype_builder.py`, migration `0005_face_prototypes`):
+  each enrolled member's embeddings are binned by head pose (`frontal`, `left`, `right`, `down`,
+  with `down` checked first as `abs(pitch_deg) >= 20`). Bins with at least `min_members_per_bin`
+  (3) embeddings collapse into a quality-weighted normalized mean; smaller bins keep individual
+  embeddings capped at `max_per_bin` (6). `classify_match` requires both
+  `top1 >= recognized_min_similarity` and `margin = top1 - top2 >= min_margin`.
+  `recognition.gallery_representation` (`centroid | shadow | prototypes`, default `shadow`) runs
+  centroids live while counting shadow divergences in `pid_gallery_representation_shadow_total`.
+  `FaceDetection` and `MatchTemplateResponse` carry `second_best_candidate_id`,
+  `second_best_similarity`, `margin`, and `gallery_representation`.
+- Operator promotion (`POST /api/v1/calibration/candidates/{id}/promote`) is the only path from a
+  labeled capture into `embeddings` (`source = deployment_capture`, recording `approved_by`,
+  `approved_at`, and `source_candidate_id`), gated on label `member`, active `quality_version`,
+  `prototypes.min_promotion_quality`, and `prototypes.min_promotion_interocular_px`. Promotion
+  increments `members.gallery_revision` and rebuilds prototypes; a calibration label alone never
+  changes the gallery.
 - Side effects are explicit. `/identify` currently writes visitor sightings for unknown faces on
   every call (`_ingest_unknown_faces` in `app/routers/identification.py`) and, with
   `calibration_capture.enabled` and a `capture_context`, queues sampled faces as calibration

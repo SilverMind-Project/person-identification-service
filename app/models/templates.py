@@ -49,11 +49,23 @@ class MatchTemplateResponse(BaseModel):
     best_candidate_id: str | None = None
     raw_similarity: float = Field(
         ...,
-        description="Raw cosine similarity of the template to the nearest centroid; not a probability",
+        description="Raw cosine similarity of the template to the nearest identity; not a probability",
+    )
+    second_best_candidate_id: str | None = Field(
+        default=None,
+        description="Runner-up enrolled identity id; null for a gallery of one member",
     )
     second_best_similarity: float | None = Field(
         default=None,
-        description="Raw cosine similarity to the second-nearest centroid; null for one member",
+        description="Raw cosine similarity to the second-nearest identity; null for one member",
+    )
+    margin: float | None = Field(
+        default=None,
+        description="Top-1 minus top-2 raw cosine similarity (top-1 when only one identity exists)",
+    )
+    gallery_representation: str = Field(
+        default="centroid",
+        description="Gallery representation that produced the score: centroid or prototypes-v1",
     )
     member_count: int = Field(..., ge=MIN_TEMPLATE_MEMBERS, le=MAX_TEMPLATE_MEMBERS)
     aggregator_version: str

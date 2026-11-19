@@ -75,7 +75,17 @@ class CalibrationArtifact(CalibrationManifest):
     y_knots: list[float] | None = None
 
 
-FEATURE_NAMES = ("similarity", "quality_score", "resolution", "sharpness", "detection", "pitch")
+FEATURE_NAMES = (
+    "similarity",
+    "quality_score",
+    "resolution",
+    "sharpness",
+    "detection",
+    "pitch",
+    "margin",
+)
+
+GalleryRepresentation = Literal["centroid", "prototypes-v1"]
 
 
 class ExternalDatasetRef(BaseModel):
@@ -112,6 +122,12 @@ class CalibrationArtifactV2(CalibrationManifest):
     x_knots: list[float] | None = None
     y_knots: list[float] | None = None
     covered_identities: list[str] = Field(default_factory=list)
+    # Gallery representation whose score distribution this artifact was fitted on. Existing schema 2
+    # artifacts without this field load as "centroid".
+    gallery_representation: GalleryRepresentation = "centroid"
+    # Per-identity gallery revision at fit time. When an identity's live revision differs (after a
+    # promotion, re-enrollment, or prototype removal), the runtime fails closed for that identity.
+    gallery_revisions: dict[str, int] = Field(default_factory=dict)
     fit_basis: Literal["household_only", "pooled"]
     # The tracker crop settings every household capture shared (padding fractions, JPEG quality).
     capture_profile: dict[str, float] = Field(default_factory=dict)

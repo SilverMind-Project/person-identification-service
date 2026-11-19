@@ -7,7 +7,9 @@ computes in float4), and removal. Skips without ``TEST_DATABASE_URL``.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import asyncpg
 import numpy as np
@@ -21,6 +23,7 @@ from app.services.enrollment_repository import (
     InMemoryEnrollmentRepository,
     PostgresEnrollmentRepository,
 )
+from app.services.prototype_builder import MemberEmbedding
 from tests.db import safe_test_dsn
 
 TEST_DSN = safe_test_dsn()
@@ -38,6 +41,7 @@ async def postgres() -> AsyncIterator[PostgresEnrollmentRepository]:
     await run_migrations(pool)
     yield PostgresEnrollmentRepository(pool)
     async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM face_prototypes")
         await conn.execute("DELETE FROM embeddings")
         await conn.execute("DELETE FROM centroids")
         await conn.execute("DELETE FROM members")
@@ -120,3 +124,108 @@ async def test_centroid_is_the_normalized_mean_in_both(
         await repo.upsert_member("p-alpha", name)
         await repo.insert_embeddings("p-alpha", embeddings)
         assert np.allclose(await repo.recompute_centroid("p-alpha"), expected, atol=1e-6)
+
+
+async def _exercise_prototypes(
+    repo: EnrollmentRepository,
+) -> tuple[dict[str, object], list[list[float]]]:
+    cand_id = str(uuid.UUID(int=42))
+    approved_at = datetime(2026, 11, 19, 10, 0, tzinfo=UTC)
+    await repo.upsert_member("p-alpha", "Alpha")
+    await repo.insert_embeddings(
+        "p-alpha",
+        [
+            MemberEmbedding(
+                embedding=_GALLERY["p-alpha"][1][0],
+                pose_bin="frontal",
+                source="enrollment_photo",
+                quality_score=0.8,
+                quality_version="heuristic-v1",
+            ),
+            MemberEmbedding(
+                embedding=_GALLERY["p-alpha"][1][1],
+                pose_bin=None,  # backfilled to frontal
+                source="enrollment_photo",
+            ),
+        ],
+    )
+    await repo.upsert_member("p-beta", "Beta")
+    await repo.insert_embeddings(
+        "p-beta",
+        [
+            MemberEmbedding(
+                embedding=_GALLERY["p-beta"][1][0],
+                pose_bin="frontal",
+                source="enrollment_photo",
+                quality_score=0.7,
+                quality_version="heuristic-v1",
+            )
+        ],
+    )
+    backfilled = await repo.backfill_missing_pose_bins("frontal")
+    await repo.add_member_embedding(
+        "p-alpha",
+        _GALLERY["p-alpha"][1][2],
+        pose_bin="down",
+        source="deployment_capture",
+        quality_score=0.75,
+        quality_version="heuristic-v1",
+        source_candidate_id=cand_id,
+        approved_by="admin",
+        approved_at=approved_at,
+        crop_object_key="calibration/42.png",
+    )
+    await repo.recompute_centroid("p-alpha")
+    await repo.recompute_centroid("p-beta")
+    await repo.rebuild_prototypes("p-alpha")
+    await repo.rebuild_prototypes("p-beta")
+
+    protos_before = await repo.list_prototypes("p-alpha")
+    nearest = [await repo.nearest_identities(q, k=2) for q in _QUERIES]
+    nearest_ids = [[(h.person_id, h.name, h.gallery_revision) for h in hits] for hits in nearest]
+    nearest_sims = [[h.similarity for h in hits] for hits in nearest]
+
+    promoted = sorted(await repo.promoted_candidate_ids())
+    await repo.clear_crop_reference("calibration/42.png")
+    protos_after_crop_clear = await repo.list_prototypes("p-alpha")
+
+    down_proto = next(p for p in protos_after_crop_clear if p.pose_bin == "down")
+    deleted = await repo.delete_prototype("p-alpha", down_proto.prototype_id)
+    deleted_missing = await repo.delete_prototype("p-alpha", str(uuid.UUID(int=999)))
+
+    # Attempting to delete beta's sole remaining prototype raises ValueError in both peers.
+    beta_proto = (await repo.list_prototypes("p-beta"))[0]
+    with pytest.raises(ValueError, match="last embedding"):
+        await repo.delete_prototype("p-beta", beta_proto.prototype_id)
+
+    record: dict[str, object] = {
+        "backfilled": backfilled,
+        "protos_before": [
+            (p.pose_bin, p.member_count, p.source, p.crop_object_key) for p in protos_before
+        ],
+        "protos_after_crop_clear": [
+            (p.pose_bin, p.crop_object_key) for p in protos_after_crop_clear
+        ],
+        "nearest_ids": nearest_ids,
+        "promoted": promoted,
+        "deleted": [deleted, deleted_missing],
+        "revisions": await repo.get_gallery_revisions(),
+        "members": [
+            (m.person_id, m.gallery_revision, m.prototype_counts) for m in await repo.list_members()
+        ],
+        "embedding_sources": {
+            pid: [(e.pose_bin, e.source, e.source_candidate_id) for e in items]
+            for pid, items in (await repo.member_embedding_records()).items()
+        },
+    }
+    return record, nearest_sims
+
+
+async def test_prototype_methods_match_between_in_memory_and_postgres(
+    postgres: PostgresEnrollmentRepository,
+) -> None:
+    pg_record, pg_sims = await _exercise_prototypes(postgres)
+    mem_record, mem_sims = await _exercise_prototypes(InMemoryEnrollmentRepository())
+
+    assert mem_record == pg_record
+    assert np.allclose(mem_sims, pg_sims, atol=1e-5)

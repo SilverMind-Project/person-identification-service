@@ -193,3 +193,96 @@ def test_template_evaluator_rejects_other_profiles_and_aggregators(
 
 def test_single_frame_evaluator_rejects_an_artifact_carrying_an_aggregator(tmp_path: Path) -> None:
     assert _load(tmp_path, _V2 | {"aggregation": "qwmean-v1"}).health() == "degraded_incompatible"
+
+
+def test_gallery_representation_mismatch_is_incompatible_for_both_profiles(tmp_path: Path) -> None:
+    path_centroid = tmp_path / "centroid.json"
+    path_centroid.write_text(json.dumps(_V2))
+    path_proto = tmp_path / "proto.json"
+    path_proto.write_text(json.dumps(_V2 | {"gallery_representation": "prototypes-v1"}))
+    path_v1 = tmp_path / "v1.json"
+    path_v1.write_text(json.dumps(_V1))
+    path_tpl_centroid = tmp_path / "tpl_centroid.json"
+    path_tpl_centroid.write_text(json.dumps(_TEMPLATE))
+    path_tpl_proto = tmp_path / "tpl_proto.json"
+    path_tpl_proto.write_text(json.dumps(_TEMPLATE | {"gallery_representation": "prototypes-v1"}))
+
+    # Centroid artifact under prototypes-v1 fails closed.
+    ev_bad_sf = CalibrationEvaluator.from_artifact_path(
+        path_centroid,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_quality_version="heuristic-v1",
+        expected_gallery_representation="prototypes-v1",
+    )
+    assert ev_bad_sf.health() == "degraded_incompatible"
+    assert ev_bad_sf.predict(_FEATURES, "resident-alpha") is None
+
+    # Schema 1 artifact under prototypes-v1 also fails closed.
+    ev_bad_v1 = CalibrationEvaluator.from_artifact_path(
+        path_v1,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_gallery_representation="prototypes-v1",
+    )
+    assert ev_bad_v1.health() == "degraded_incompatible"
+
+    # Prototypes artifact under prototypes-v1 loads ready.
+    ev_good_sf = CalibrationEvaluator.from_artifact_path(
+        path_proto,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_quality_version="heuristic-v1",
+        expected_gallery_representation="prototypes-v1",
+    )
+    assert ev_good_sf.health() == "ready"
+    assert ev_good_sf.gallery_representation() == "prototypes-v1"
+
+    # Template evaluator also enforces gallery_representation.
+    ev_bad_tpl = CalibrationEvaluator.from_artifact_path(
+        path_tpl_centroid,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_quality_version="heuristic-v1",
+        expected_calibration_profile="template",
+        expected_aggregation="qwmean-v1",
+        expected_gallery_representation="prototypes-v1",
+    )
+    assert ev_bad_tpl.health() == "degraded_incompatible"
+    ev_good_tpl = CalibrationEvaluator.from_artifact_path(
+        path_tpl_proto,
+        expected_arcface_model_version="buffalo_l",
+        expected_model_profile="full",
+        expected_preprocessing_version="v1",
+        expected_quality_version="heuristic-v1",
+        expected_calibration_profile="template",
+        expected_aggregation="qwmean-v1",
+        expected_gallery_representation="prototypes-v1",
+    )
+    assert ev_good_tpl.health() == "ready"
+
+
+def test_gallery_revision_mismatch_drops_only_that_identity_from_coverage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    artifact = _V2 | {
+        "covered_identities": ["resident-alpha", "resident-beta"],
+        "gallery_revisions": {"resident-alpha": 2, "resident-beta": 1},
+    }
+    ev = _load(tmp_path, artifact)
+    assert ev.health() == "ready"
+    assert ev.predict(_FEATURES, "resident-alpha", gallery_revision=2) is not None
+    assert ev.predict(_FEATURES, "resident-beta", gallery_revision=1) is not None
+
+    with caplog.at_level("WARNING"):
+        assert ev.predict(_FEATURES, "resident-alpha", gallery_revision=3) is None
+        assert ev.predict(_FEATURES, "resident-alpha", gallery_revision=3) is None
+    # Logged once per (identity, fitted, live) mismatch.
+    warnings = [r for r in caplog.records if "calibration_identity_revision_mismatch" in r.message]
+    assert len(warnings) == 1
+    # Beta is unaffected by alpha's gallery revision change.
+    assert ev.predict(_FEATURES, "resident-beta", gallery_revision=1) is not None

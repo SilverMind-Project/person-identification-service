@@ -169,3 +169,42 @@ async def test_database_rejects_an_incomplete_label(pool: asyncpg.Pool) -> None:
         await repo.insert(_candidate(0, label_identity_id="resident-alpha"))
     with pytest.raises(asyncpg.CheckViolationError):
         await repo.insert(_candidate(1, label_state="labeled", label_kind="member"))
+
+
+async def test_delete_for_person_matches_between_in_memory_and_postgres(pool: asyncpg.Pool) -> None:
+    async def _run(repo: CalibrationCandidateRepository) -> tuple[list[str], list[str]]:
+        labeled_alpha = _candidate(
+            10,
+            label_state="labeled",
+            label_kind="member",
+            label_identity_id="resident-alpha",
+            label_source="operator_reviewed",
+            labeled_by="op",
+            labeled_at=_T,
+            nearest_person_id="resident-beta",
+        )
+        unlabeled_alpha = _candidate(11, nearest_person_id="resident-alpha")
+        labeled_visitor = _candidate(
+            12,
+            label_state="labeled",
+            label_kind="not_enrolled",
+            label_identity_id=None,
+            label_source="operator_reviewed",
+            labeled_by="op",
+            labeled_at=_T,
+            nearest_person_id="resident-alpha",
+        )
+        for c in (labeled_alpha, unlabeled_alpha, labeled_visitor):
+            await repo.insert(c)
+        deleted_keys = await repo.delete_for_person("resident-alpha")
+        remaining = [
+            c.candidate_id
+            for c in (await repo.list_page(state=None, limit=10, cursor=None)).candidates
+        ]
+        return deleted_keys, remaining
+
+    pg_result = await _run(PostgresCalibrationCandidateRepository(pool))
+    mem_result = await _run(InMemoryCalibrationCandidateRepository())
+    assert mem_result == pg_result
+    assert pg_result[0] == ["calibration/2026-10-21/10.png", "calibration/2026-10-21/11.png"]
+    assert pg_result[1] == [_candidate(12).candidate_id]

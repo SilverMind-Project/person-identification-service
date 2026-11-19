@@ -39,9 +39,28 @@ class FaceDetection(BaseModel):
     similarity: float = Field(
         default=0.0,
         description=(
-            "Raw ArcFace cosine similarity to the best candidate centroid; the face's match score. "
+            "Raw ArcFace cosine similarity to the best candidate; the face's match score. "
             "Not a probability: calibrated_confidence is the probability."
         ),
+    )
+    second_best_candidate_id: str | None = Field(
+        default=None,
+        description="Runner-up enrolled identity id; null when fewer than two identities exist",
+    )
+    second_best_similarity: float | None = Field(
+        default=None,
+        description="Raw ArcFace cosine similarity to the runner-up identity; null if absent",
+    )
+    margin: float | None = Field(
+        default=None,
+        description=(
+            "Top-1 minus top-2 raw cosine similarity (equals top-1 when only one identity exists; "
+            "null for an empty gallery)"
+        ),
+    )
+    gallery_representation: str = Field(
+        default="centroid",
+        description="Gallery representation that produced the score: centroid or prototypes-v1",
     )
     yaw_deg: float = Field(default=0.0, description="Head pose yaw in degrees")
     pitch_deg: float = Field(default=0.0, description="Head pose pitch in degrees")

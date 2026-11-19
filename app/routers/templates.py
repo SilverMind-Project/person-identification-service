@@ -74,16 +74,20 @@ async def match_template(request: Request, body: MatchTemplateRequest) -> MatchT
     decision = match.decision
     calibrated_confidence: float | None = None
     if decision.recognition_state == "recognized":
+        features: dict[str, float] = {
+            "similarity": decision.similarity,
+            "quality_score": match.quality.score,
+            "resolution": match.quality.resolution,
+            "sharpness": match.quality.sharpness,
+            "detection": match.quality.detection,
+            "pitch": match.quality.pitch,
+        }
+        if match.margin is not None:
+            features["margin"] = match.margin
         calibrated_confidence = evaluator.predict(
-            {
-                "similarity": decision.similarity,
-                "quality_score": match.quality.score,
-                "resolution": match.quality.resolution,
-                "sharpness": match.quality.sharpness,
-                "detection": match.quality.detection,
-                "pitch": match.quality.pitch,
-            },
+            features,
             decision.best_candidate_id,
+            gallery_revision=decision.gallery_revision,
         )
     template_matches_total.labels(recognition_state=decision.recognition_state).inc()
     logger.info(
@@ -98,7 +102,10 @@ async def match_template(request: Request, body: MatchTemplateRequest) -> MatchT
         recognition_state=decision.recognition_state,
         best_candidate_id=decision.best_candidate_id,
         raw_similarity=decision.similarity,
+        second_best_candidate_id=match.second_best_candidate_id,
         second_best_similarity=match.second_best_similarity,
+        margin=match.margin,
+        gallery_representation=match.gallery_representation,
         member_count=match.member_count,
         aggregator_version=match.aggregator_version,
         template_quality=TemplateQualityModel(

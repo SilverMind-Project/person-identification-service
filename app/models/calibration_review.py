@@ -29,6 +29,29 @@ class CandidateView(BaseModel):
     label_identity_id: str | None = None
     labeled_by: str | None = None
     labeled_at: datetime | None = None
+    pose_bin: Literal["frontal", "left", "right", "down"] = "frontal"
+    promoted: bool = False
+    promotion_eligible: bool = False
+    promotion_ineligible_reason: str | None = None
+
+
+class PromoteCandidateRequest(BaseModel):
+    """Explicit operator action to promote a labeled capture into a member's prototypes."""
+
+    model_config = {"extra": "forbid"}
+
+    approved_by: str = Field(..., min_length=1, max_length=128)
+    person_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class PromoteCandidateResponse(BaseModel):
+    candidate_id: str
+    person_id: str
+    pose_bin: Literal["frontal", "left", "right", "down"]
+    embedding_id: int
+    gallery_revision: int = Field(..., ge=1)
+    prototype_count: int = Field(..., ge=0)
+    counts_by_bin: dict[str, int]
 
 
 class CandidateListResponse(BaseModel):
@@ -92,3 +115,10 @@ class CalibrationSummary(BaseModel):
     identities: list[IdentityProgress]
     not_enrolled_episodes: int
     capture_enabled: bool
+    promotable_by_identity_pose: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        description=(
+            "Count of labeled member captures per identity and pose bin that meet promotion "
+            "quality and interocular distance floors"
+        ),
+    )

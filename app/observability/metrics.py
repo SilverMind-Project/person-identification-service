@@ -78,3 +78,15 @@ template_matches_total = Counter(
     "Face templates matched by /match-template, by the template's recognition state.",
     ["recognition_state"],
 )
+
+# Bounded outcomes for shadow comparison between centroid and multi-prototype matching.
+GALLERY_SHADOW_OUTCOMES = ("same_state_same_id", "state_changed", "identity_changed")
+
+gallery_representation_shadow_total = Counter(
+    "pid_gallery_representation_shadow_total",
+    "Shadow comparison of prototype matching against centroid matching, by outcome: "
+    "same_state_same_id, state_changed, or identity_changed.",
+    ["outcome"],
+)
+for _outcome in GALLERY_SHADOW_OUTCOMES:
+    gallery_representation_shadow_total.labels(outcome=_outcome)

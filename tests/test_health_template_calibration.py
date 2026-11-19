@@ -31,11 +31,15 @@ def test_health_has_a_template_calibration_block() -> None:
     body = TestClient(app).get("/health").json()
 
     assert body["calibration"]["status"] == "degraded_missing"
+    assert body["calibration"]["gallery_representation"] == ""
+    assert body["gallery_representation"] == "centroid"
+    assert body["active_gallery_representation"] == "centroid"
     assert body["template_calibration"] == {
         "status": "degraded_incompatible",
         "artifact_version": None,
         "profile": "",
         "aggregation": None,
         "quality_version": "",
+        "gallery_representation": "",
         "covered_identities": None,
     }

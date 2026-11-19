@@ -38,9 +38,17 @@ import cv2
 import numpy as np
 
 from app.calibration.episodes import EpisodeInput, assign_episodes, episode_label
+from app.calibration.models import GalleryRepresentation
 from app.services.calibration_candidates import CalibrationCandidate
 from app.services.face_models import DetectedFace
 from app.services.face_quality import FaceQuality
+from app.services.prototype_builder import (
+    EmbeddingSource,
+    MemberEmbedding,
+    PoseBin,
+    PrototypePolicy,
+    build_prototypes,
+)
 from app.services.template_aggregation import TemplateAggregator, template_quality
 
 Dataset = Literal["household", "external"]
@@ -72,6 +80,8 @@ class ScoreRecord:
     camera_id: str
     label_source: str
     dataset: Dataset
+    # Top-1 margin relative to the strongest other enrolled identity; None in pre-margin manifests.
+    margin: float | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +89,10 @@ class GalleryEmbedding:
     embedding: np.ndarray
     # The calibration candidate the embedding was promoted from, when it was; None for photos.
     source_candidate_id: str | None = None
+    pose_bin: PoseBin | None = None
+    source: EmbeddingSource = "enrollment_photo"
+    quality_score: float | None = None
+    quality_version: str | None = None
 
 
 @dataclass
@@ -100,6 +114,9 @@ class ManifestMeta:
     # Template profile only: the aggregator version and the per-episode template cap.
     aggregation: str | None = None
     max_records_per_episode: int | None = None
+    # Gallery representation whose score distribution this manifest records.
+    gallery_representation: GalleryRepresentation = "centroid"
+    gallery_revisions: dict[str, int] = field(default_factory=dict)
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -121,12 +138,46 @@ def _single(values: Iterable[Any], what: str) -> Any:
     return next(iter(distinct), None)
 
 
+def _prototype_vectors(
+    identity: str,
+    embeddings: Sequence[GalleryEmbedding],
+    policy: PrototypePolicy,
+) -> list[np.ndarray]:
+    if not embeddings:
+        return []
+    members = [
+        MemberEmbedding(
+            embedding=g.embedding,
+            embedding_id=idx,
+            pose_bin=g.pose_bin,
+            source=g.source,
+            quality_score=g.quality_score,
+            quality_version=g.quality_version,
+            source_candidate_id=g.source_candidate_id,
+        )
+        for idx, g in enumerate(embeddings)
+    ]
+    return [_unit(p.embedding) for p in build_prototypes(identity, members, policy)]
+
+
+def _scores_with_margins(scores: Sequence[tuple[str, float]]) -> list[tuple[str, float, float]]:
+    """Attach each scored identity's margin vs the highest-scoring other identity."""
+    if len(scores) <= 1:
+        return [(identity, sim, sim) for identity, sim in scores]
+    result: list[tuple[str, float, float]] = []
+    for identity, sim in scores:
+        other_best = max(other_sim for other_id, other_sim in scores if other_id != identity)
+        result.append((identity, sim, sim - other_best))
+    return result
+
+
 @dataclass
 class _HouseholdProbes:
     usable: list[CalibrationCandidate]
     episodes: dict[str, str]  # candidate id -> episode id
     episode_members: dict[str, set[str]]  # episode id -> candidate ids
     full_centroids: dict[str, np.ndarray | None]
+    full_prototypes: dict[str, list[np.ndarray]]
 
 
 def _household_probes(
@@ -135,8 +186,11 @@ def _household_probes(
     *,
     episode_gap_s: float,
     meta: ManifestMeta,
+    gallery_representation: GalleryRepresentation = "centroid",
+    prototype_policy: PrototypePolicy = PrototypePolicy(),
 ) -> _HouseholdProbes | None:
-    """Usable labeled captures, their episodes, and the gallery centroids; None if none usable."""
+    """Usable labeled captures, their episodes, and precomputed gallery representations."""
+    meta.gallery_representation = gallery_representation
     usable: list[CalibrationCandidate] = []
     for c in candidates:
         if c.label_state != "labeled" or c.label_kind is None:
@@ -180,7 +234,15 @@ def _household_probes(
         identity: _centroid([g.embedding for g in embeddings])
         for identity, embeddings in gallery.items()
     }
-    return _HouseholdProbes(usable, episodes, episode_members, full_centroids)
+    full_prototypes = (
+        {
+            identity: _prototype_vectors(identity, embeddings, prototype_policy)
+            for identity, embeddings in gallery.items()
+        }
+        if gallery_representation == "prototypes-v1"
+        else {}
+    )
+    return _HouseholdProbes(usable, episodes, episode_members, full_centroids, full_prototypes)
 
 
 def _gallery_scores(
@@ -189,27 +251,40 @@ def _gallery_scores(
     episode: str,
     gallery: Mapping[str, Sequence[GalleryEmbedding]],
     prepared: _HouseholdProbes,
-) -> list[tuple[str, float]]:
-    """(identity, cosine) of a unit probe against every identity's centroid.
+    *,
+    gallery_representation: GalleryRepresentation = "centroid",
+    prototype_policy: PrototypePolicy = PrototypePolicy(),
+) -> list[tuple[str, float, float]]:
+    """(identity, cosine, margin) of a unit probe against every identity's gallery.
 
-    The probe's own identity is scored against a centroid without embeddings promoted from the
+    The probe's own identity is scored against a gallery without embeddings promoted from the
     probe's episode (leave-episode-out).
     """
     scores: list[tuple[str, float]] = []
     for identity in sorted(gallery):
-        centroid = prepared.full_centroids[identity]
-        if identity == probe_identity:
-            same_episode = prepared.episode_members[episode]
-            centroid = _centroid(
-                [
-                    g.embedding
-                    for g in gallery[identity]
-                    if g.source_candidate_id not in same_episode
-                ]
-            )
-        if centroid is not None:
-            scores.append((identity, float(np.dot(probe, centroid))))
-    return scores
+        if gallery_representation == "prototypes-v1":
+            if identity == probe_identity:
+                same_episode = prepared.episode_members[episode]
+                kept = [g for g in gallery[identity] if g.source_candidate_id not in same_episode]
+                vectors = _prototype_vectors(identity, kept, prototype_policy)
+            else:
+                vectors = prepared.full_prototypes.get(identity, [])
+            if vectors:
+                scores.append((identity, max(float(np.dot(probe, v)) for v in vectors)))
+        else:
+            centroid = prepared.full_centroids[identity]
+            if identity == probe_identity:
+                same_episode = prepared.episode_members[episode]
+                centroid = _centroid(
+                    [
+                        g.embedding
+                        for g in gallery[identity]
+                        if g.source_candidate_id not in same_episode
+                    ]
+                )
+            if centroid is not None:
+                scores.append((identity, float(np.dot(probe, centroid))))
+    return _scores_with_margins(scores)
 
 
 def _probe_identity(c: CalibrationCandidate) -> str | None:
@@ -222,9 +297,18 @@ def household_records(
     *,
     episode_gap_s: float,
     meta: ManifestMeta,
+    gallery_representation: GalleryRepresentation = "centroid",
+    prototype_policy: PrototypePolicy = PrototypePolicy(),
 ) -> list[ScoreRecord]:
     """Score records for labeled household captures against every enrolled identity."""
-    prepared = _household_probes(candidates, gallery, episode_gap_s=episode_gap_s, meta=meta)
+    prepared = _household_probes(
+        candidates,
+        gallery,
+        episode_gap_s=episode_gap_s,
+        meta=meta,
+        gallery_representation=gallery_representation,
+        prototype_policy=prototype_policy,
+    )
     if prepared is None:
         return []
 
@@ -233,8 +317,14 @@ def household_records(
         probe_identity = _probe_identity(c)
         episode = prepared.episodes[c.candidate_id]
         probe = _unit(np.asarray(c.embedding, dtype=np.float64))
-        for identity, similarity in _gallery_scores(
-            probe, probe_identity, episode, gallery, prepared
+        for identity, similarity, margin in _gallery_scores(
+            probe,
+            probe_identity,
+            episode,
+            gallery,
+            prepared,
+            gallery_representation=gallery_representation,
+            prototype_policy=prototype_policy,
         ):
             records.append(
                 ScoreRecord(
@@ -252,6 +342,7 @@ def household_records(
                     camera_id=c.camera_id,
                     label_source=str(c.label_source),
                     dataset="household",
+                    margin=margin,
                 )
             )
     meta.open_set_probes += sum(1 for c in prepared.usable if c.label_kind == "not_enrolled")
@@ -314,6 +405,8 @@ def template_records(
     aggregator: TemplateAggregator,
     max_per_episode: int = DEFAULT_TEMPLATES_PER_EPISODE,
     random_seed: int = 42,
+    gallery_representation: GalleryRepresentation = "centroid",
+    prototype_policy: PrototypePolicy = PrototypePolicy(),
 ) -> list[ScoreRecord]:
     """Score records for templates drawn within labeled household episodes.
 
@@ -324,7 +417,14 @@ def template_records(
     meta.profile = "template"
     meta.aggregation = aggregator.version
     meta.max_records_per_episode = max_per_episode
-    prepared = _household_probes(candidates, gallery, episode_gap_s=episode_gap_s, meta=meta)
+    prepared = _household_probes(
+        candidates,
+        gallery,
+        episode_gap_s=episode_gap_s,
+        meta=meta,
+        gallery_representation=gallery_representation,
+        prototype_policy=prototype_policy,
+    )
     if prepared is None:
         return []
 
@@ -346,8 +446,14 @@ def template_records(
             )
             quality = template_quality(qualities)
             probe = _unit(np.asarray(template, dtype=np.float64))
-            for identity, similarity in _gallery_scores(
-                probe, probe_identity, episode, gallery, prepared
+            for identity, similarity, margin in _gallery_scores(
+                probe,
+                probe_identity,
+                episode,
+                gallery,
+                prepared,
+                gallery_representation=gallery_representation,
+                prototype_policy=prototype_policy,
             ):
                 records.append(
                     ScoreRecord(
@@ -365,6 +471,7 @@ def template_records(
                         camera_id=chosen[0].camera_id,
                         label_source=str(chosen[0].label_source),
                         dataset="household",
+                        margin=margin,
                     )
                 )
             if probe_identity is None:
@@ -439,12 +546,14 @@ def external_records(faces: Sequence[ExternalFace]) -> list[ScoreRecord]:
         assert probe.face.quality is not None
         q = probe.face.quality
         vector = _unit(np.asarray(probe.embedding, dtype=np.float64))
+        raw_scores: list[tuple[str, float]] = []
         for identity in sorted(by_identity):
             centroid = _centroid(
                 [f.embedding for f in by_identity[identity] if f.probe_id != probe.probe_id]
             )
-            if centroid is None:
-                continue
+            if centroid is not None:
+                raw_scores.append((identity, float(np.dot(vector, centroid))))
+        for identity, similarity, margin in _scores_with_margins(raw_scores):
             records.append(
                 ScoreRecord(
                     probe_id=probe.probe_id,
@@ -452,7 +561,7 @@ def external_records(faces: Sequence[ExternalFace]) -> list[ScoreRecord]:
                     identity_id=f"external:{identity}",
                     probe_identity_id=f"external:{probe.identity_id}",
                     label=int(identity == probe.identity_id),
-                    similarity=float(np.dot(vector, centroid)),
+                    similarity=similarity,
                     quality_score=q.score,
                     resolution=q.resolution,
                     sharpness=q.sharpness,
@@ -461,6 +570,7 @@ def external_records(faces: Sequence[ExternalFace]) -> list[ScoreRecord]:
                     camera_id="external",
                     label_source="external_benchmark",
                     dataset="external",
+                    margin=margin,
                 )
             )
     return records

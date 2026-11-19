@@ -49,6 +49,33 @@ recognition:
   # fit shows where they should sit. Calibrated confidence, not these, decides authority.
   template_threshold: 0.4
   template_unknown_threshold: 0.25
+  # Minimum cosine margin (top1 - top2) required for recognized state; faces within this margin of
+  # a second enrolled identity drop to candidate. Starts at 0.0 (inactive) until calibration data
+  # sets a household value.
+  min_margin: 0.0
+  template_min_margin: 0.0
+  # Gallery matching representation:
+  #   centroid   - one averaged embedding per person (legacy)
+  #   shadow     - answer with centroid, evaluate pose-binned prototypes and count differences
+  #   prototypes - answer with max similarity over pose-binned prototypes (requires matching
+  #                prototypes-v1 calibration artifacts before authority is enabled)
+  gallery_representation: "${GALLERY_REPRESENTATION:shadow}"
+
+# Multi-prototype enrollment: pose-binned prototypes (frontal, left, right, down) and promotion
+# floors for operator-approved deployment captures.
+prototypes:
+  # Minimum embeddings in one pose bin before they collapse into a single quality-weighted mean
+  # prototype; smaller bins keep their individual embeddings to avoid noisy means.
+  min_members_per_bin: 3
+  # Maximum prototypes retained per pose bin (highest quality kept) to bound impostor match risk.
+  max_per_bin: 6
+  # Conservative weight in [0, 1] for embeddings without a matching-version face quality score.
+  missing_quality_weight: 0.5
+  # Minimum face quality score (active scorer version) required to promote a labeled capture.
+  min_promotion_quality: 0.5
+  # Minimum eye-keypoint distance in pixels required to promote a labeled capture; prevents tiny
+  # low-resolution faces from entering the enrollment gallery.
+  min_promotion_interocular_px: 24.0
 
 # Motion direction detection
 motion:

@@ -353,6 +353,22 @@
       "title": "Covered Identities",
       "type": "array"
     },
+    "gallery_representation": {
+      "default": "centroid",
+      "enum": [
+        "centroid",
+        "prototypes-v1"
+      ],
+      "title": "Gallery Representation",
+      "type": "string"
+    },
+    "gallery_revisions": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Gallery Revisions",
+      "type": "object"
+    },
     "fit_basis": {
       "enum": [
         "household_only",

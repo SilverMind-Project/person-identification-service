@@ -25,10 +25,17 @@ from app.models.visitor import (
     VisitorSighting,
 )
 from app.observability import metrics
-from app.services.centroid import insert_embeddings, recompute_member_centroid
+from app.services.centroid import (
+    insert_embeddings,
+    rebuild_member_prototypes,
+    recompute_member_centroid,
+)
+from app.services.enrollment_store import EnrollmentStore
 from app.services.face_engine import FaceEngine
 from app.services.face_models import DetectedFace, IdentifyResult
+from app.services.match_policy import MatchThresholds
 from app.services.minio_client import MinioClient
+from app.services.prototype_builder import MemberEmbedding, PrototypePolicy
 from app.services.visitor_policy import (
     CLOSED_STATUSES,
     JOINABLE_STATUSES,
@@ -58,9 +65,19 @@ class _JoinableCluster:
 class VisitorStore:
     """Manages the visitor-cluster dataset: ingest, clustering, review, retention."""
 
-    def __init__(self, pool: asyncpg.Pool, minio_client: MinioClient) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        minio_client: MinioClient,
+        *,
+        thresholds: MatchThresholds | None = None,
+        enrollment_store: EnrollmentStore | None = None,
+        prototype_policy: PrototypePolicy = PrototypePolicy(),
+    ) -> None:
         self._pool = pool
         self._minio = minio_client
+        self._enrollment_store = enrollment_store
+        self._prototype_policy = prototype_policy
 
         self._clustering_enabled = bool(config.get("visitors.clustering_enabled", True))
         self._min_detection_score = float(config.get("visitors.min_detection_score", 0.6))
@@ -71,7 +88,11 @@ class VisitorStore:
         self._surface_window_days = int(config.get("visitors.surface_window_days", 30))
         self._unnamed_retention_days = int(config.get("visitors.unnamed_retention_days", 60))
         self._enroll_top_k = int(config.get("visitors.enroll_top_k", 5))
-        self._recognition_threshold = float(config.get("recognition.threshold", 0.4))
+        self._recognition_threshold = (
+            thresholds.recognized_min_similarity
+            if thresholds is not None
+            else float(config.get("recognition.threshold", 0.4))
+        )
         self._gate = SightingGate(
             min_detection_score=self._min_detection_score,
             min_face_px=self._min_face_px,
@@ -104,12 +125,22 @@ class VisitorStore:
         if not self._clustering_enabled:
             return None
 
+        member_similarity = identity.similarity
+        if (
+            self._enrollment_store is not None
+            and identity.gallery_representation != self._enrollment_store.active_representation
+        ):
+            # Evaluate member margin against the active matcher (for example, max over prototypes)
+            # when the caller passed a result from a different representation.
+            matched = await self._enrollment_store.identify(face.embedding)
+            member_similarity = matched.similarity
+
         x1, y1, x2, y2 = face.bbox
         rejection = sighting_rejection(
             self._gate,
             det_score=face.det_score,
             face_min_side_px=min(x2 - x1, y2 - y1),
-            member_similarity=identity.similarity,
+            member_similarity=member_similarity,
             quality_score=None if face.quality is None else face.quality.score,
             yaw_deg=face.yaw_deg,
         )
@@ -392,18 +423,31 @@ class VisitorStore:
                 raise ValueError(f"person_id '{person_id}' already exists")
 
             embedding_rows = await conn.fetch(
-                """SELECT embedding FROM visitor_sightings WHERE cluster_id = $1
+                """SELECT embedding, crop_object FROM visitor_sightings WHERE cluster_id = $1
                    ORDER BY quality DESC LIMIT $2""",
                 cluster_id,
                 self._enroll_top_k,
             )
-            embeddings = [np.asarray(r["embedding"], dtype=np.float32) for r in embedding_rows]
+            # visitor_sightings.quality stores detector score, not face quality; leave quality null
+            # so prototypes weigh them conservatively instead of mixing incompatible scores.
+            embeddings = [
+                MemberEmbedding(
+                    embedding=np.asarray(r["embedding"], dtype=np.float32),
+                    pose_bin="frontal",
+                    source="visitor_naming",
+                    quality_score=None,
+                    quality_version=None,
+                    crop_object_key=r["crop_object"],
+                )
+                for r in embedding_rows
+            ]
 
             await conn.execute(
                 "INSERT INTO members (person_id, name) VALUES ($1, $2)", person_id, name
             )
             await insert_embeddings(conn, person_id, embeddings)
             await recompute_member_centroid(conn, person_id)
+            await rebuild_member_prototypes(conn, person_id, self._prototype_policy)
 
             await conn.execute(
                 """UPDATE visitor_clusters

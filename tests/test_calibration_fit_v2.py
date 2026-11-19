@@ -310,3 +310,30 @@ def test_single_frame_fit_records_no_aggregator_and_its_gates() -> None:
     assert result.artifact is not None
     assert (result.artifact.profile, result.artifact.aggregation) == ("single_frame", None)
     assert result.artifact.gates["min_holdout_genuine_per_identity"] == 30.0
+    assert result.artifact.gallery_representation == "centroid"
+
+
+def test_prototypes_fit_records_representation_revisions_and_evaluates_margin() -> None:
+    base_records = _records()
+    # Attach margin to every record: genuine gets positive margin, impostor negative.
+    by_probe: dict[str, list[ScoreRecord]] = {}
+    for r in base_records:
+        by_probe.setdefault(r.probe_id, []).append(r)
+    with_margin: list[ScoreRecord] = []
+    for group in by_probe.values():
+        for r in group:
+            other_best = max(o.similarity for o in group if o.identity_id != r.identity_id)
+            with_margin.append(ScoreRecord(**{**r.__dict__, "margin": r.similarity - other_best}))
+
+    meta = _META | {
+        "gallery_representation": "prototypes-v1",
+        "gallery_revisions": {identity: idx + 1 for idx, identity in enumerate([*_STRONG, _WEAK])},
+    }
+    result = run_fit_v2(with_margin, meta, model_profile="full", allow_household_only=True)
+    assert result.failures == []
+    assert result.artifact is not None
+    assert result.artifact.gallery_representation == "prototypes-v1"
+    # Only covered identities appear in gallery_revisions (_WEAK is excluded).
+    assert set(result.artifact.gallery_revisions) == set(_STRONG)
+    assert _WEAK not in result.artifact.gallery_revisions
+    assert any("margin" in fs for fs in result.report["feature_sets"])

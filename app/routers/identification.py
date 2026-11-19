@@ -76,8 +76,10 @@ def _encode_image_to_base64(image) -> str:
 
 
 def _calibration_features(r: IdentifyResult) -> dict[str, float]:
-    """The feature map a calibration artifact evaluates: similarity plus face-quality scores."""
+    """The feature map a calibration artifact evaluates: similarity, margin, and quality scores."""
     features = {"similarity": r.similarity}
+    if r.margin is not None:
+        features["margin"] = r.margin
     if r.quality is not None:
         features |= {
             "quality_score": r.quality.score,
@@ -105,7 +107,11 @@ def _make_face_detection(
     """
     calibrated_confidence: float | None = None
     if r.recognition_state == "recognized":
-        calibrated_confidence = evaluator.predict(_calibration_features(r), r.best_candidate_id)
+        calibrated_confidence = evaluator.predict(
+            _calibration_features(r),
+            r.best_candidate_id,
+            gallery_revision=r.gallery_revision,
+        )
 
     return FaceDetection(
         person_id=r.person_id,
@@ -114,6 +120,10 @@ def _make_face_detection(
         recognition_state=r.recognition_state,
         best_candidate_id=r.best_candidate_id,
         similarity=r.similarity,
+        second_best_candidate_id=r.second_best_candidate_id,
+        second_best_similarity=r.second_best_similarity,
+        margin=r.margin,
+        gallery_representation=r.gallery_representation,
         yaw_deg=r.yaw_deg,
         pitch_deg=r.pitch_deg,
         roll_deg=r.roll_deg,

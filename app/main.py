@@ -34,16 +34,19 @@ from app.services.calibration_capture import (
     MinioCropStore,
 )
 from app.services.enrollment_repository import PostgresEnrollmentRepository
-from app.services.enrollment_store import EnrollmentStore
+from app.services.enrollment_store import EnrollmentStore, GalleryRepresentationMode
 from app.services.face_engine import FaceEngine
 from app.services.face_quality import build_face_quality_scorer
 from app.services.guest_store import GuestImageStore
 from app.services.match_policy import MatchThresholds
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
+from app.services.prototype_builder import PrototypePolicy
 from app.services.template_aggregation import QualityWeightedMeanAggregator
 from app.services.template_match import TemplateMatchService
 from app.services.visitor_store import VisitorStore
+
+_VALID_GALLERY_MODES = ("centroid", "shadow", "prototypes")
 
 _RETENTION_INTERVAL_S = 24 * 60 * 60
 
@@ -68,6 +71,28 @@ async def _retention_loop(
             raise
         except Exception:
             logger.exception("Calibration capture retention job failed")
+
+
+def _gallery_representation_mode() -> GalleryRepresentationMode:
+    raw = str(config.get("recognition.gallery_representation", "shadow")).strip()
+    if raw not in _VALID_GALLERY_MODES:
+        raise ValueError(
+            f"Unknown recognition.gallery_representation {raw!r}; expected one of "
+            f"{_VALID_GALLERY_MODES}"
+        )
+    return raw  # type: ignore[return-value]
+
+
+def _prototype_policy(quality_version: str) -> PrototypePolicy:
+    section = config.get("prototypes", {}) or {}
+    return PrototypePolicy(
+        min_members_per_bin=int(section.get("min_members_per_bin", 3)),
+        max_per_bin=int(section.get("max_per_bin", 6)),
+        missing_quality_weight=float(section.get("missing_quality_weight", 0.5)),
+        expected_quality_version=quality_version,
+        min_promotion_quality=float(section.get("min_promotion_quality", 0.5)),
+        min_promotion_interocular_px=float(section.get("min_promotion_interocular_px", 24.0)),
+    )
 
 
 def _capture_policy() -> CapturePolicy:
@@ -103,6 +128,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Configuration errors fail before any connection is opened.
     quality_scorer = build_face_quality_scorer(config.get("face_quality", {}))
+    gallery_mode = _gallery_representation_mode()
+    prototype_policy = _prototype_policy(quality_scorer.version)
     capture_policy = _capture_policy()
 
     # Database pool
@@ -136,36 +163,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.face_engine = face_engine
         app.state.triton_client = triton_client
 
-        enrollment_repository = PostgresEnrollmentRepository(pool)
-        enrollment_store = EnrollmentStore(
-            enrollment_repository,
-            face_engine,
-            MatchThresholds(
-                recognized_min_similarity=float(config.get("recognition.threshold", 0.4)),
-                candidate_min_similarity=float(config.get("recognition.unknown_threshold", 0.25)),
-            ),
-        )
-        app.state.enrollment_store = enrollment_store
-        template_aggregator = QualityWeightedMeanAggregator()
-        app.state.template_matcher = TemplateMatchService(
-            enrollment_repository,
-            template_aggregator,
-            MatchThresholds(
-                recognized_min_similarity=float(config.get("recognition.template_threshold", 0.4)),
-                candidate_min_similarity=float(
-                    config.get("recognition.template_unknown_threshold", 0.25)
-                ),
-            ),
-        )
-        app.state.face_quality_version = quality_scorer.version
-
-        app.state.motion_detector = MotionDetector()
-
-        app.state.guest_store = GuestImageStore(pool, minio_client)
-
-        visitor_store = VisitorStore(pool, minio_client)
-        app.state.visitor_store = visitor_store
-
         calibration_candidates = PostgresCalibrationCandidateRepository(pool)
         app.state.calibration_candidates = calibration_candidates
         calibration_capture = CalibrationCaptureService(
@@ -181,14 +178,59 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.calibration_capture = calibration_capture
         logger.info("Calibration capture enabled=%s", calibration_capture.enabled)
 
+        enrollment_repository = PostgresEnrollmentRepository(pool)
+        recognition_thresholds = MatchThresholds(
+            recognized_min_similarity=float(config.get("recognition.threshold", 0.4)),
+            candidate_min_similarity=float(config.get("recognition.unknown_threshold", 0.25)),
+            min_margin=float(config.get("recognition.min_margin", 0.0)),
+        )
+        enrollment_store = EnrollmentStore(
+            enrollment_repository,
+            face_engine,
+            recognition_thresholds,
+            gallery_representation=gallery_mode,
+            prototype_policy=prototype_policy,
+            on_member_removed=calibration_capture.delete_for_person,
+        )
+        app.state.enrollment_store = enrollment_store
+        template_aggregator = QualityWeightedMeanAggregator()
+        app.state.template_matcher = TemplateMatchService(
+            enrollment_repository,
+            template_aggregator,
+            MatchThresholds(
+                recognized_min_similarity=float(config.get("recognition.template_threshold", 0.4)),
+                candidate_min_similarity=float(
+                    config.get("recognition.template_unknown_threshold", 0.25)
+                ),
+                min_margin=float(config.get("recognition.template_min_margin", 0.0)),
+            ),
+            gallery_representation=gallery_mode,
+        )
+        app.state.face_quality_version = quality_scorer.version
+
+        app.state.motion_detector = MotionDetector()
+
+        app.state.guest_store = GuestImageStore(pool, minio_client)
+
+        visitor_store = VisitorStore(
+            pool,
+            minio_client,
+            thresholds=recognition_thresholds,
+            enrollment_store=enrollment_store,
+            prototype_policy=prototype_policy,
+        )
+        app.state.visitor_store = visitor_store
+
         retention_task = asyncio.create_task(_retention_loop(visitor_store, calibration_capture))
 
+        expected_rep = enrollment_store.active_representation
         calibration_evaluator = CalibrationEvaluator.from_artifact_path(
             config.get("calibration.artifact_path", "") or None,
             expected_arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
             expected_model_profile=str(face_engine.model_profile),
             expected_preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
             expected_quality_version=quality_scorer.version,
+            expected_gallery_representation=expected_rep,
         )
         app.state.calibration_evaluator = calibration_evaluator
         template_calibration_evaluator = CalibrationEvaluator.from_artifact_path(
@@ -199,6 +241,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             expected_quality_version=quality_scorer.version,
             expected_calibration_profile=TEMPLATE_PROFILE,
             expected_aggregation=template_aggregator.version,
+            expected_gallery_representation=expected_rep,
         )
         app.state.template_calibration_evaluator = template_calibration_evaluator
         logger.info(

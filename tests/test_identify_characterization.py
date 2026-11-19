@@ -120,6 +120,10 @@ def _store(pool: asyncpg.Pool, engine: _ScriptedEngine) -> EnrollmentStore:
 def _result_record(result: Any) -> dict[str, Any]:
     record = dataclasses.asdict(result)
     record["similarity"] = round(record["similarity"], 5)
+    if record["second_best_similarity"] is not None:
+        record["second_best_similarity"] = round(record["second_best_similarity"], 5)
+    if record["margin"] is not None:
+        record["margin"] = round(record["margin"], 5)
     return record
 
 

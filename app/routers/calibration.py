@@ -1,7 +1,9 @@
-"""Calibration-candidate review: list, label, reject, delete, and progress summary.
+"""Calibration-candidate review: list, label, promote, reject, delete, and progress summary.
 
 cognitive-companion proxies these for the operator's review screen and presigns the crop keys,
-as it does for visitor clusters. Labels set ``label_source = operator_reviewed``.
+as it does for visitor clusters. Labels set ``label_source = operator_reviewed`` and never change
+the enrollment gallery; only explicit operator promotion via ``POST /candidates/{id}/promote``
+adds an embedding to the gallery and rebuilds that member's prototypes.
 """
 
 from __future__ import annotations
@@ -24,8 +26,12 @@ from app.models.calibration_review import (
     LabelBatchResponse,
     LabelBatchResult,
     LabelRequest,
+    PromoteCandidateRequest,
+    PromoteCandidateResponse,
 )
 from app.services.calibration_candidates import CalibrationCandidate, quality_decile
+from app.services.enrollment_store import PromotionConflictError, PromotionIneligibleError
+from app.services.prototype_builder import PrototypePolicy, pose_bin, promotion_ineligibility
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +43,36 @@ _HOLDOUT_GENUINE_MINIMUM = 30
 _HOLDOUT_FRACTION = 0.2
 
 
-def _view(c: CalibrationCandidate) -> CandidateView:
+def _active_quality_version(request: Request) -> str:
+    return str(getattr(request.app.state, "face_quality_version", "heuristic-v1"))
+
+
+def _prototype_policy(request: Request) -> PrototypePolicy:
+    store = getattr(request.app.state, "enrollment_store", None)
+    if store is not None and hasattr(store, "prototype_policy"):
+        return store.prototype_policy
+    return PrototypePolicy()
+
+
+def _view(
+    c: CalibrationCandidate,
+    *,
+    promoted_ids: set[str],
+    active_quality_version: str,
+    policy: PrototypePolicy,
+) -> CandidateView:
+    promoted = c.candidate_id in promoted_ids
+    reason = promotion_ineligibility(
+        label_state=c.label_state,
+        label_kind=c.label_kind,
+        label_identity_id=c.label_identity_id,
+        quality_score=c.quality_score,
+        quality_version=c.quality_version,
+        interocular_px=c.interocular_px,
+        active_quality_version=active_quality_version,
+        policy=policy,
+        already_promoted=promoted,
+    )
     return CandidateView(
         candidate_id=c.candidate_id,
         captured_at=c.captured_at,
@@ -55,6 +90,10 @@ def _view(c: CalibrationCandidate) -> CandidateView:
         label_identity_id=c.label_identity_id,
         labeled_by=c.labeled_by,
         labeled_at=c.labeled_at,
+        pose_bin=pose_bin(c.yaw_deg, c.pitch_deg),
+        promoted=promoted,
+        promotion_eligible=reason is None,
+        promotion_ineligible_reason=reason,
     )
 
 
@@ -71,8 +110,20 @@ async def list_candidates(
         page = await repo.list_page(state=state, limit=limit, cursor=cursor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    quality_version = _active_quality_version(request)
+    policy = _prototype_policy(request)
     return CandidateListResponse(
-        candidates=[_view(c) for c in page.candidates], next_cursor=page.next_cursor
+        candidates=[
+            _view(
+                c,
+                promoted_ids=promoted_ids,
+                active_quality_version=quality_version,
+                policy=policy,
+            )
+            for c in page.candidates
+        ],
+        next_cursor=page.next_cursor,
     )
 
 
@@ -95,7 +146,13 @@ async def label_candidate(request: Request, candidate_id: str, body: LabelReques
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="candidate not found")
-    return _view(updated)
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    return _view(
+        updated,
+        promoted_ids=promoted_ids,
+        active_quality_version=_active_quality_version(request),
+        policy=_prototype_policy(request),
+    )
 
 
 @router.post("/candidates/label-batch", response_model=LabelBatchResponse)
@@ -127,25 +184,81 @@ async def label_candidates(request: Request, body: LabelBatchRequest) -> LabelBa
     return LabelBatchResponse(results=results, labeled=labeled, failed=len(results) - labeled)
 
 
+@router.post("/candidates/{candidate_id}/promote", response_model=PromoteCandidateResponse)
+async def promote_candidate(
+    request: Request, candidate_id: str, body: PromoteCandidateRequest
+) -> PromoteCandidateResponse:
+    """Promote a labeled member capture into that member's gallery and rebuild prototypes.
+
+    Side effect: adds the capture's embedding to ``embeddings`` with ``source=deployment_capture``,
+    increments the member's ``gallery_revision`` (pausing calibrated recognition authority for that
+    member until the next calibration fit), recomputes the centroid, and rebuilds prototypes.
+    """
+    candidate = await request.app.state.calibration_candidates.get(candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+
+    try:
+        result = await request.app.state.enrollment_store.promote_candidate(
+            candidate,
+            approved_by=body.approved_by,
+            active_quality_version=_active_quality_version(request),
+            person_id=body.person_id,
+        )
+    except PromotionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PromotionIneligibleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    counts_by_bin: dict[str, int] = {}
+    for proto in result.prototypes:
+        counts_by_bin[proto.pose_bin] = counts_by_bin.get(proto.pose_bin, 0) + 1
+    return PromoteCandidateResponse(
+        candidate_id=candidate_id,
+        person_id=result.person_id,
+        pose_bin=result.pose_bin,
+        embedding_id=result.embedding_id,
+        gallery_revision=result.gallery_revision,
+        prototype_count=len(result.prototypes),
+        counts_by_bin=dict(sorted(counts_by_bin.items())),
+    )
+
+
 @router.post("/candidates/{candidate_id}/reject", response_model=CandidateView)
 async def reject_candidate(request: Request, candidate_id: str) -> CandidateView:
     """Mark a candidate unusable; it is purged with unlabeled captures."""
     updated = await request.app.state.calibration_candidates.reject(candidate_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="candidate not found")
-    return _view(updated)
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    return _view(
+        updated,
+        promoted_ids=promoted_ids,
+        active_quality_version=_active_quality_version(request),
+        policy=_prototype_policy(request),
+    )
 
 
 @router.delete("/candidates/{candidate_id}", status_code=204)
 async def delete_candidate(request: Request, candidate_id: str) -> None:
-    """Delete a candidate and its crop (labeled candidates persist until deleted here)."""
-    if not await request.app.state.calibration_capture.delete_candidate(candidate_id):
+    """Delete a candidate and its crop (labeled candidates persist until deleted here).
+
+    If the candidate was already promoted, its promoted embedding and source candidate id stay in
+    the gallery; only the deleted crop reference is cleared.
+    """
+    deleted_key = await request.app.state.calibration_capture.delete_candidate_returning_key(
+        candidate_id
+    )
+    if deleted_key is None:
         raise HTTPException(status_code=404, detail="candidate not found")
+    store = getattr(request.app.state, "enrollment_store", None)
+    if store is not None and hasattr(store, "clear_crop_reference"):
+        await store.clear_crop_reference(deleted_key)
 
 
 @router.get("/summary", response_model=CalibrationSummary)
 async def calibration_summary(request: Request) -> CalibrationSummary:
-    """Label progress: counts per state, kind, quality decile and camera; episodes per identity."""
+    """Label progress: counts per state, kind, quality decile, camera, and promotable pose bins."""
     repo = request.app.state.calibration_candidates
     labeled = await repo.list_labeled()
     usable = [c for c in labeled if c.label_kind in ("member", "not_enrolled")]
@@ -163,6 +276,28 @@ async def calibration_summary(request: Request) -> CalibrationSummary:
     for c in usable:
         if c.label_kind == "member" and c.label_identity_id is not None:
             identity_episodes.setdefault(c.label_identity_id, set()).add(episodes[c.candidate_id])
+
+    quality_version = _active_quality_version(request)
+    policy = _prototype_policy(request)
+    promotable: dict[str, dict[str, int]] = {}
+    for c in usable:
+        if c.label_kind != "member" or c.label_identity_id is None:
+            continue
+        reason = promotion_ineligibility(
+            label_state=c.label_state,
+            label_kind=c.label_kind,
+            label_identity_id=c.label_identity_id,
+            quality_score=c.quality_score,
+            quality_version=c.quality_version,
+            interocular_px=c.interocular_px,
+            active_quality_version=quality_version,
+            policy=policy,
+        )
+        if reason is None:
+            b = pose_bin(c.yaw_deg, c.pitch_deg)
+            by_bin = promotable.setdefault(c.label_identity_id, {})
+            by_bin[b] = by_bin.get(b, 0) + 1
+
     target = math.ceil(_HOLDOUT_GENUINE_MINIMUM / _HOLDOUT_FRACTION)
     return CalibrationSummary(
         by_state=await repo.count_by_state(),
@@ -182,4 +317,7 @@ async def calibration_summary(request: Request) -> CalibrationSummary:
             {episodes[c.candidate_id] for c in usable if c.label_kind == "not_enrolled"}
         ),
         capture_enabled=request.app.state.calibration_capture.enabled,
+        promotable_by_identity_pose={
+            pid: dict(sorted(bins.items())) for pid, bins in sorted(promotable.items())
+        },
     )

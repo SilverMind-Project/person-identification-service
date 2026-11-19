@@ -38,6 +38,8 @@ async def health(request: Request):
         "triton_endpoint": engine.endpoint,
         "model_profile": engine.model_profile,
         "enrolled_members": await store.member_count(),
+        "gallery_representation": getattr(store, "gallery_representation_mode", "centroid"),
+        "active_gallery_representation": getattr(store, "active_representation", "centroid"),
         "model": config.get("face_engine.model_name", "buffalo_l"),
         "models": engine.model_names,
         "calibration": {
@@ -47,6 +49,7 @@ async def health(request: Request):
             "preprocessing_version": evaluator.preprocessing_version(),
             "profile": evaluator.calibration_profile(),
             "quality_version": evaluator.quality_version(),
+            "gallery_representation": evaluator.gallery_representation(),
             "covered_identities": evaluator.covered_identities(),
         },
         # Calibration for /match-template templates: its own artifact, profile, and coverage.
@@ -56,6 +59,7 @@ async def health(request: Request):
             "profile": template_evaluator.calibration_profile(),
             "aggregation": template_evaluator.aggregation(),
             "quality_version": template_evaluator.quality_version(),
+            "gallery_representation": template_evaluator.gallery_representation(),
             "covered_identities": template_evaluator.covered_identities(),
         },
     }

@@ -8,8 +8,17 @@ import cv2
 import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
-from app.models.enrollment import EnrollRequest, EnrollResult, MemberInfo, MemberListResponse
+from app.models.enrollment import (
+    EnrollRequest,
+    EnrollResult,
+    MemberInfo,
+    MemberListResponse,
+    MemberPrototypesResponse,
+    PrototypeInfo,
+    RebuildPrototypesResponse,
+)
 from app.services.face_engine import decode_base64_image
+from app.services.prototype_builder import Prototype
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["enrollment"])
@@ -126,3 +135,81 @@ async def delete_member(request: Request, person_id: str):
     if not await store.remove_member(person_id):
         raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
     return {"deleted": True, "person_id": person_id}
+
+
+def _proto_info(proto: Prototype) -> PrototypeInfo:
+    return PrototypeInfo(
+        prototype_id=proto.prototype_id,
+        person_id=proto.person_id,
+        pose_bin=proto.pose_bin,
+        member_count=proto.member_count,
+        source=proto.source,
+        quality_score=proto.quality_score,
+        quality_version=proto.quality_version,
+        crop_object_key=proto.crop_object_key,
+        approved_by=proto.approved_by,
+        approved_at=proto.approved_at,
+        created_at=proto.created_at,
+    )
+
+
+def _counts_by_bin(prototypes: list[Prototype]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for proto in prototypes:
+        counts[proto.pose_bin] = counts.get(proto.pose_bin, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+@router.get("/members/{person_id}/prototypes", response_model=MemberPrototypesResponse)
+async def list_member_prototypes(request: Request, person_id: str) -> MemberPrototypesResponse:
+    """List pose-binned prototypes for one enrolled member."""
+    store = request.app.state.enrollment_store
+    member = await store.get_member(person_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
+    prototypes = await store.list_prototypes(person_id)
+    return MemberPrototypesResponse(
+        person_id=person_id,
+        gallery_revision=member.gallery_revision,
+        prototypes=[_proto_info(p) for p in prototypes],
+        counts_by_bin=_counts_by_bin(prototypes),
+    )
+
+
+@router.post("/members/{person_id}/prototypes/rebuild", response_model=RebuildPrototypesResponse)
+async def rebuild_member_prototypes_route(
+    request: Request, person_id: str
+) -> RebuildPrototypesResponse:
+    """Rebuild pose-binned prototypes for one enrolled member from all stored embeddings."""
+    store = request.app.state.enrollment_store
+    member = await store.get_member(person_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
+    prototypes = await store.rebuild_prototypes(person_id)
+    return RebuildPrototypesResponse(
+        person_id=person_id,
+        prototype_count=len(prototypes),
+        counts_by_bin=_counts_by_bin(prototypes),
+    )
+
+
+@router.delete("/members/{person_id}/prototypes/{prototype_id}")
+async def delete_member_prototype(
+    request: Request, person_id: str, prototype_id: str
+) -> dict[str, object]:
+    """Delete one prototype (and its underlying embedding(s)), recompute centroid and prototypes.
+
+    Refuses with 409 when removal would leave the member with zero embeddings; delete the member's
+    enrollment instead.
+    """
+    store = request.app.state.enrollment_store
+    member = await store.get_member(person_id)
+    if member is None:
+        raise HTTPException(status_code=404, detail=f"Member '{person_id}' not found")
+    try:
+        deleted = await store.delete_prototype(person_id, prototype_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Prototype '{prototype_id}' not found")
+    return {"deleted": True, "person_id": person_id, "prototype_id": prototype_id}

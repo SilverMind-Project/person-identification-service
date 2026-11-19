@@ -67,6 +67,8 @@ class CalibrationEvaluator:
         self._artifact = artifact
         self._health_state = health_state
         self._reason = reason
+        # Log each (identity_id, fitted_revision, live_revision) mismatch once per evaluator.
+        self._logged_revision_mismatches: set[tuple[str, int, int | None]] = set()
 
     # ------------------------------------------------------------------
     # Factory
@@ -83,13 +85,16 @@ class CalibrationEvaluator:
         expected_quality_version: str = "",
         expected_calibration_profile: str = SINGLE_FRAME_PROFILE,
         expected_aggregation: str | None = None,
+        expected_gallery_representation: str = "centroid",
     ) -> CalibrationEvaluator:
         """Load a calibration artifact from disk, returning a degraded evaluator on any failure.
 
         ``expected_quality_version`` is the active face-quality scorer's version; a schema 2
         artifact fitted on another scorer's scores is incompatible. ``expected_calibration_profile``
-        is the profile this evaluator serves (schema 1 artifacts are single-frame), and
-        ``expected_aggregation`` the live template aggregator's version (None for single-frame).
+        is the profile this evaluator serves (schema 1 artifacts are single-frame),
+        ``expected_aggregation`` is the live template aggregator's version (None for single-frame),
+        and ``expected_gallery_representation`` is the active gallery representation (``centroid``
+        or ``prototypes-v1``).
         """
         if not artifact_path:
             logger.warning("calibration_artifact_missing reason=no_path_configured")
@@ -120,6 +125,7 @@ class CalibrationEvaluator:
             quality_version=expected_quality_version,
             calibration_profile=expected_calibration_profile,
             aggregation=expected_aggregation,
+            gallery_representation=expected_gallery_representation,
         )
         if mismatch is not None:
             logger.warning("calibration_artifact_incompatible field=%s", mismatch)
@@ -144,21 +150,40 @@ class CalibrationEvaluator:
     # Public API
     # ------------------------------------------------------------------
 
-    def predict(self, features: Mapping[str, float], identity_id: str | None) -> float | None:
+    def predict(
+        self,
+        features: Mapping[str, float],
+        identity_id: str | None,
+        *,
+        gallery_revision: int | None = None,
+    ) -> float | None:
         """Calibrated probability that a face belongs to ``identity_id``.
 
-        ``features`` maps feature names (``similarity`` and, for schema 2, face-quality features)
-        to values. Returns None in any degraded state, when a feature the artifact needs is
-        missing, when a schema 2 artifact does not cover ``identity_id``, or on evaluation error.
-        Callers must not substitute raw similarity when the return is None.
+        ``features`` maps feature names (``similarity`` and, for schema 2, face-quality features
+        and optionally ``margin``) to values. Returns None in any degraded state, when a feature
+        the artifact needs is missing, when a schema 2 artifact does not cover ``identity_id``,
+        when ``identity_id``'s live ``gallery_revision`` differs from the revision recorded at fit
+        time, or on evaluation error. Callers must not substitute raw similarity when None.
         """
         artifact = self._artifact
         if self._health_state != "ready" or artifact is None:
             return None
-        if isinstance(artifact, CalibrationArtifactV2) and (
-            identity_id is None or identity_id not in artifact.covered_identities
-        ):
-            return None
+        if isinstance(artifact, CalibrationArtifactV2):
+            if identity_id is None or identity_id not in artifact.covered_identities:
+                return None
+            fitted_rev = artifact.gallery_revisions.get(identity_id)
+            if fitted_rev is not None and gallery_revision != fitted_rev:
+                key = (identity_id, fitted_rev, gallery_revision)
+                if key not in self._logged_revision_mismatches:
+                    self._logged_revision_mismatches.add(key)
+                    logger.warning(
+                        "calibration_identity_revision_mismatch identity_id=%s "
+                        "fitted_revision=%d live_revision=%s",
+                        identity_id,
+                        fitted_rev,
+                        gallery_revision,
+                    )
+                return None
         try:
             return _apply(artifact, features)
         except KeyError:
@@ -208,6 +233,20 @@ class CalibrationEvaluator:
             return list(self._artifact.covered_identities)
         return None
 
+    def gallery_representation(self) -> str:
+        """The gallery representation the loaded artifact was fitted on, else ``""``."""
+        if self._artifact is None:
+            return ""
+        if isinstance(self._artifact, CalibrationArtifactV2):
+            return self._artifact.gallery_representation
+        return "centroid"
+
+    def gallery_revisions(self) -> dict[str, int]:
+        """Per-identity gallery revisions recorded in a schema 2 artifact."""
+        if isinstance(self._artifact, CalibrationArtifactV2):
+            return dict(self._artifact.gallery_revisions)
+        return {}
+
 
 # ------------------------------------------------------------------
 # Internal helpers (no scikit-learn)
@@ -223,6 +262,7 @@ def _first_mismatch(
     quality_version: str,
     calibration_profile: str,
     aggregation: str | None,
+    gallery_representation: str,
 ) -> str | None:
     if arcface_model_version and artifact.arcface_model_version != arcface_model_version:
         return "arcface_model_version"
@@ -237,9 +277,14 @@ def _first_mismatch(
             return "quality_version"
         if artifact.aggregation != aggregation:
             return "aggregation"
-    elif calibration_profile != SINGLE_FRAME_PROFILE:
-        # Schema 1 maps single-face similarity; it never calibrates a template.
-        return "profile"
+        if gallery_representation and artifact.gallery_representation != gallery_representation:
+            return "gallery_representation"
+    else:
+        if calibration_profile != SINGLE_FRAME_PROFILE:
+            # Schema 1 maps single-face similarity; it never calibrates a template.
+            return "profile"
+        if gallery_representation and gallery_representation != "centroid":
+            return "gallery_representation"
     return None
 
 

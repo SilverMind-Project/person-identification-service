@@ -260,11 +260,22 @@ class CalibrationCaptureService:
         return len(keys)
 
     async def delete_candidate(self, candidate_id: str) -> bool:
+        return (await self.delete_candidate_returning_key(candidate_id)) is not None
+
+    async def delete_candidate_returning_key(self, candidate_id: str) -> str | None:
+        """Delete a candidate and its crop; returns the deleted crop key or None if missing."""
         key = await self._repository.delete(candidate_id)
         if key is None:
-            return False
+            return None
         await self._crops.delete([key])
-        return True
+        return key
+
+    async def delete_for_person(self, person_id: str) -> int:
+        """Delete candidates (and crops) associated with a removed member."""
+        keys = await self._repository.delete_for_person(person_id)
+        if keys:
+            await self._crops.delete(keys)
+        return len(keys)
 
 
 class MinioCropStore:

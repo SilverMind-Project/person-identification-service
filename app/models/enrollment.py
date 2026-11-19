@@ -1,10 +1,19 @@
-"""Pydantic models for enrollment endpoints."""
+"""Pydantic models for enrollment and face-prototype endpoints."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+PoseBinLiteral = Literal["frontal", "left", "right", "down"]
+EmbeddingSourceLiteral = Literal[
+    "enrollment_photo",
+    "deployment_capture",
+    "visitor_naming",
+    "wearable_exemplar",
+]
 
 
 class EnrollRequest(BaseModel):
@@ -35,8 +44,44 @@ class MemberInfo(BaseModel):
     name: str
     embedding_count: int
     created_at: datetime
+    gallery_revision: int = Field(
+        default=1,
+        ge=1,
+        description="Monotonic revision incremented whenever this member's gallery changes",
+    )
+    prototype_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Prototype count per pose bin (frontal, left, right, down)",
+    )
 
 
 class MemberListResponse(BaseModel):
     members: list[MemberInfo]
     total: int
+
+
+class PrototypeInfo(BaseModel):
+    prototype_id: str
+    person_id: str
+    pose_bin: PoseBinLiteral
+    member_count: int = Field(..., ge=1)
+    source: EmbeddingSourceLiteral
+    quality_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    quality_version: str | None = None
+    crop_object_key: str | None = None
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+class MemberPrototypesResponse(BaseModel):
+    person_id: str
+    gallery_revision: int = Field(..., ge=1)
+    prototypes: list[PrototypeInfo]
+    counts_by_bin: dict[str, int]
+
+
+class RebuildPrototypesResponse(BaseModel):
+    person_id: str
+    prototype_count: int = Field(..., ge=0)
+    counts_by_bin: dict[str, int]

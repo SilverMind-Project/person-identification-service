@@ -50,3 +50,8 @@ class IdentifyResult:
     face_height_px: float = 0.0  # face box height in input-image pixels
     interocular_px: float | None = None  # eye-keypoint distance in input-image pixels
     quality: FaceQuality | None = None  # face image quality, carried from DetectedFace
+    second_best_candidate_id: str | None = None  # runner-up identity id when gallery has >= 2
+    second_best_similarity: float | None = None  # raw cosine similarity to runner-up identity
+    margin: float | None = None  # top1 - top2 similarity (or top1 when only one identity exists)
+    gallery_representation: str = "centroid"  # "centroid" | "prototypes-v1"
+    gallery_revision: int = 1  # matched member's live gallery revision

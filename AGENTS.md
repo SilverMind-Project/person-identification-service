@@ -67,27 +67,30 @@ person-identification-service/
 │   │   └── metrics.py       # Prometheus metrics (pid_face_interocular_px, pid_face_quality_score, visitor counters)
 │   ├── routers/
 │   │   ├── health.py        # GET /health, GET /metrics (no /api/v1 prefix)
-│   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}
+│   │   ├── enrollment.py    # POST /enroll, POST /enroll/upload/{id}, GET/DELETE /members/{id}, /members/{id}/prototypes*
 │   │   ├── identification.py # POST /identify, POST /identify-batch
 │   │   ├── motion.py        # POST /detect-motion
 │   │   ├── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
-│   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete; /calibration/summary
-│   └── services/
-│       ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
-│       ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
-│       ├── face_geometry.py   # Face box size and interocular distance (pure)
-│       ├── face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
-│       ├── enrollment_store.py # Orchestration: enroll(), identify(), identify_all(), members (no SQL, no config)
-│       ├── enrollment_repository.py # EnrollmentRepository protocol + Postgres and in-memory peers
-│       ├── match_policy.py    # classify_match: nearest centroids to recognition state (pure)
-│       ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
-│       ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
-│       ├── calibration_candidates.py # Calibration capture repository (Postgres + in-memory peers)
-│       ├── calibration_capture.py # Stratified capture policy, background crop upload, retention
-│       ├── minio_client.py    # boto3 S3 wrapper for MinIO
-│       ├── motion_detector.py # Cross-frame centroid tracking + direction classification
-│       ├── guest_store.py     # MinIO uploads for unidentified-person frames
-│       └── image_annotator.py # Bounding box + label drawing
+│   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete, promote; /calibration/summary
+│   ├── services/
+│   │   ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
+│   │   ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
+│   │   ├── face_geometry.py   # Face box size and interocular distance (pure)
+│   │   ├── face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
+│   │   ├── prototype_builder.py # Pose binning, quality weighting, prototype clustering, promotion rules (pure)
+│   │   ├── enrollment_store.py # Orchestration: enroll(), identify(), identify_all(), promote_candidate(), members (no SQL, no config)
+│   │   ├── enrollment_repository.py # EnrollmentRepository protocol + Postgres and in-memory peers
+│   │   ├── match_policy.py    # classify_match: nearest identities + margin to recognition state (pure)
+│   │   ├── centroid.py        # Shared embedding insert + centroid recompute (enroll and visitor naming)
+│   │   ├── visitor_store.py   # Visitor sightings, clustering, surfacing, naming, retention
+│   │   ├── calibration_candidates.py # Calibration capture repository (Postgres + in-memory peers)
+│   │   ├── calibration_capture.py # Stratified capture policy, background crop upload, retention
+│   │   ├── minio_client.py    # boto3 S3 wrapper for MinIO
+│   │   ├── motion_detector.py # Cross-frame centroid tracking + direction classification
+│   │   ├── guest_store.py     # MinIO uploads for unidentified-person frames
+│   │   └── image_annotator.py # Bounding box + label drawing
+│   └── tools/
+│       └── rebuild_prototypes.py # CLI to backfill pose bins and rebuild face_prototypes for all members
 ├── config/
 │   └── settings.yaml        # All application settings
 ├── scripts/
@@ -381,10 +384,10 @@ Manages the visitor clustering subsystem for recurring unknown visitors.
 An async daily task deletes clusters in any state but `named` whose `last_seen_at` is older than `unnamed_retention_days` (60), including sightings and MinIO crops. A closed cluster that keeps absorbing would never age out that way, so its individual sightings older than the window are deleted too, while the cluster row and frozen centroid stay. Named clusters are exempt.
 
 **Calibration captures are not enrollment:**
-`CalibrationCaptureService` (`app/services/calibration_capture.py`) samples faces from tracker `/identify` calls into `calibration_candidates` (migration 0003), capped per (quality decile, nearest identity or `none`, camera) per UTC day. Capture runs in a bounded background queue and never fails or slows `/identify`. A label never changes the gallery; labeled rows are read only by the offline `build-manifest` command. Unlabeled and rejected rows are purged after `unlabeled_retention_days` (30) with their crops.
+`CalibrationCaptureService` (`app/services/calibration_capture.py`) samples faces from tracker `/identify` calls into `calibration_candidates` (migration 0003), capped per (quality decile, nearest identity or `none`, camera) per UTC day. Capture runs in a bounded background queue and never fails or slows `/identify`. A label never changes the gallery; only explicit promotion (`POST /api/v1/calibration/candidates/{candidate_id}/promote`), an operator action gated on member label, active quality scorer version, `prototypes.min_promotion_quality`, and `prototypes.min_promotion_interocular_px`, adds the embedding (`source = deployment_capture`, `source_candidate_id` recorded for leave-episode-out calibration) and increments `members.gallery_revision`. Unlabeled and rejected rows are purged after `unlabeled_retention_days` (30) with their crops.
 
-**Naming is privileged:**
-The API exposes `/api/v1/visitors/clusters/{id}/name`. Naming is the single privileged transition: it moves biometric data from the visitor dataset into the enrollment dataset. Enrollment gains entries ONLY via explicit enroll calls or explicit operator naming of a visitor cluster; never automatically.
+**Naming and promotion are privileged:**
+The API exposes `/api/v1/visitors/clusters/{id}/name` and `/api/v1/calibration/candidates/{id}/promote`. Enrollment gains entries ONLY via explicit enroll calls, explicit operator naming of a visitor cluster, or explicit operator promotion of a labeled capture; never automatically.
 
 ### 6.8 CalibrationEvaluator (`app/calibration/evaluator.py`)
 
@@ -411,7 +414,10 @@ Domain endpoints are under `/api/v1`. Health and metrics are at the root. There 
 | `POST` | `/api/v1/enroll/upload/{person_id}` | Multipart: `name` + `files` | `EnrollResult` |
 | `GET` | `/api/v1/members` | -- | `MemberListResponse` |
 | `GET` | `/api/v1/members/{person_id}` | -- | `MemberInfo` (404 if missing) |
-| `DELETE` | `/api/v1/members/{person_id}` | -- | `{"deleted": true, "person_id": str}` (404 if missing) |
+| `DELETE` | `/api/v1/members/{person_id}` | -- | `{"deleted": true, "person_id": str}` (404 if missing); also removes calibration candidates and crops associated with the member |
+| `GET` | `/api/v1/members/{person_id}/prototypes` | -- | `MemberPrototypesResponse` (prototypes per pose bin, gallery revision) |
+| `POST` | `/api/v1/members/{person_id}/prototypes/rebuild` | -- | `RebuildPrototypesResponse` (rebuilds pose-binned prototypes from stored embeddings) |
+| `DELETE` | `/api/v1/members/{person_id}/prototypes/{prototype_id}` | -- | Removes prototype and its underlying embedding(s), rebuilds centroid and prototypes, bumps revision (409 if last embedding) |
 
 Enroll error handling:
 - Returns 400 if no valid images provided
@@ -465,6 +471,7 @@ presigns the crop keys):
 | `GET` | `/api/v1/calibration/candidates` | Calibration captures, newest first (`state`, `limit`, `cursor`) |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/label` | Label a capture: member, not enrolled, or not a face |
 | `POST` | `/api/v1/calibration/candidates/label-batch` | Label several captures `not_enrolled` or `not_a_face`, one result each; member labels are refused (one face at a time) |
+| `POST` | `/api/v1/calibration/candidates/{candidate_id}/promote` | Promote a labeled member capture (meeting quality and interocular floors) into enrollment prototypes and bump `gallery_revision` |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable (purged with unlabeled ones) |
 | `DELETE` | `/api/v1/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
 | `GET` | `/api/v1/calibration/summary` | Labeling progress per identity, kind, quality decile, camera |
@@ -529,6 +536,7 @@ Tables added on top of the core tables:
 | `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed, attributed), centroid, and review record |
 | `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
 | `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003) |
+| `face_prototypes` | Regular | Pose-binned face prototypes (`frontal`, `left`, `right`, `down`) per member, exact search, `ON DELETE CASCADE` (0005) |
 
 List every migration with `ls migrations`.
 

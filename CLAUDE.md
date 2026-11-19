@@ -64,8 +64,9 @@ any blocked command yourself with `!` if it is intended. `make hooks-test` is pa
   instantiated in routers.
 - Schema changes are new numbered `migrations/NNNN_name.up.sql` files with a matching
   `.down.sql`; `0001_initial_schema` is frozen; never drop the database to apply a change.
-- Enrollment gains entries only through explicit enroll calls or explicit operator naming of a
-  visitor cluster; calibration labels never change the gallery.
+- Enrollment gains entries only through explicit enroll calls, explicit operator naming of a
+  visitor cluster, or explicit operator promotion of a labeled capture; calibration labels alone
+  never change the gallery.
 - `similarity` is a raw cosine score, never a probability; `calibrated_confidence` is null
   without a compatible artifact and never falls back to raw similarity.
 - Logging is stdlib `logging.getLogger(__name__)` by design (other repositories differ); never

@@ -586,6 +586,10 @@ FEATURE_SETS: tuple[tuple[str, ...], ...] = (
     ("similarity", "quality_score"),
     ("similarity", "resolution", "sharpness"),
 )
+MARGIN_FEATURE_SETS: tuple[tuple[str, ...], ...] = (
+    ("similarity", "margin", "quality_score"),
+    ("similarity", "margin", "resolution", "sharpness"),
+)
 
 
 @dataclass
@@ -818,9 +822,23 @@ def run_fit_v2(
             [],
         )
 
+    gallery_representation = str(meta.get("gallery_representation", "centroid"))
+    if gallery_representation not in ("centroid", "prototypes-v1"):
+        return FitV2Result(
+            None,
+            [f"unsupported gallery_representation {gallery_representation!r}"],
+            [],
+        )
+
+    candidate_feature_sets: tuple[tuple[str, ...], ...] = FEATURE_SETS
+    if gallery_representation == "prototypes-v1" and all(
+        r.margin is not None and math.isfinite(r.margin) for r in records
+    ):
+        candidate_feature_sets = FEATURE_SETS + MARGIN_FEATURE_SETS
+
     report: dict[str, Any] = {"feature_sets": {}}
     best: tuple[float, int, tuple[str, ...], list[float], float] | None = None
-    for features in FEATURE_SETS:
+    for features in candidate_feature_sets:
         try:
             coefficients, intercept = fit_logistic_v2(split.fit, features, random_seed)
         except ValueError as exc:
@@ -907,6 +925,10 @@ def run_fit_v2(
     fit_n, fit_pos, fit_neg = _counts(split.fit)
     val_n, val_pos, val_neg = _counts(split.val)
     test_n, test_pos, test_neg = _counts(holdout)
+    raw_revisions = meta.get("gallery_revisions") or {}
+    covered_revisions = {
+        identity: int(raw_revisions[identity]) for identity in covered if identity in raw_revisions
+    }
     artifact = CalibrationArtifactV2(
         artifact_version=str(uuid.uuid4()),
         method="logistic_v2",
@@ -940,6 +962,8 @@ def run_fit_v2(
         coefficients=coefficients,
         intercept=intercept,
         covered_identities=covered,
+        gallery_representation=gallery_representation,  # type: ignore[arg-type]
+        gallery_revisions=covered_revisions,
         fit_basis="pooled" if has_external else "household_only",
         capture_profile={k: float(v) for k, v in dict(meta.get("capture_profile", {})).items()},
         household_holdout_metrics=metrics,
