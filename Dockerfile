@@ -1,5 +1,5 @@
 # Build the API client independently from the inference accelerator.
-FROM ghcr.io/astral-sh/uv:0.11.17 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 
 FROM python:3.12-slim AS build
 
