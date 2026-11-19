@@ -16,7 +16,8 @@ dependencies = [
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "asyncpg>=0.30",
-    "pgvector>=0.3",
+    # pgvector 0.5 changed asyncpg's register_vector return type from ndarray to Vector.
+    "pgvector>=0.3,<0.5",
     "boto3>=1.35",
     "prometheus-client>=0.21",
 ]
@@ -124,4 +125,5 @@ ignore_missing_imports = true
 # ── Pytest ───────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "fixture-scope"
 testpaths = ["tests"]

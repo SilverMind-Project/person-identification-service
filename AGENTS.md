@@ -216,6 +216,7 @@ In `app.main` lifespan (order matters):
 
 ```python
 from app.config import config
+
 model = config.get("face_engine.model_name")  # "buffalo_l"
 threshold = config.get("recognition.threshold", 0.4)
 ```
@@ -599,6 +600,7 @@ service's own database deleted the household's enrollment.
 
 ```python
 TEST_DSN = safe_test_dsn()
+
 
 @pytest_asyncio.fixture
 async def pool():

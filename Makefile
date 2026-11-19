@@ -13,7 +13,7 @@
 
 UV := uv run --frozen --extra dev --extra calibration-tools
 
-.PHONY: help lint format-check typecheck test check audit hooks-test check-md docs-check install-hooks
+.PHONY: help lint format-check typecheck test check check-toolchain deps-outdated deps-upgrade audit hooks-test check-md docs-check install-hooks
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
@@ -44,7 +44,16 @@ install-hooks: ## Use the versioned git hooks in .githooks/ (also writes the Git
 	git config core.hooksPath .githooks
 	git lfs update --force
 
-check: lint format-check typecheck test hooks-test check-md docs-check ## The quality gate
+check-toolchain: ## Verify Python pins stay aligned across pyproject.toml, Dockerfile, and CI
+	@bash scripts/check-toolchain-sync.sh
+
+deps-outdated: ## List outdated Python packages (read-only)
+	@bash scripts/deps-upgrade.sh --check
+
+deps-upgrade: ## Upgrade PyPI packages in uv.lock (preserving git pins) and run check + audit
+	@bash scripts/deps-upgrade.sh --apply
+
+check: lint format-check typecheck test hooks-test check-md docs-check check-toolchain ## The quality gate
 
 # pip-audit must read the locked requirements: a bare `uvx pip-audit` audits the throwaway
 # environment uvx builds for pip-audit itself and always reports clean. triton-shared is a git
