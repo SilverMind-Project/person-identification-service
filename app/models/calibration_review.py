@@ -39,6 +39,8 @@ class CandidateView(BaseModel):
     audit_verdict: Literal["correct", "wrong", "not_a_face"] | None = None
     audited_by: str | None = None
     audited_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
 
 
 class PromoteCandidateRequest(BaseModel):
@@ -173,3 +175,43 @@ class AuditSummaryResponse(BaseModel):
     meets_bar: bool = Field(
         ..., description="Attested labels may join a calibration manifest (build-manifest)"
     )
+
+
+class RevokeAttestationsRequest(BaseModel):
+    """Revoke every wearable-attested face capture produced by one association segment."""
+
+    model_config = {"extra": "forbid"}
+
+    association_id: str = Field(..., min_length=1, max_length=64)
+    revoked_by: str = Field(..., min_length=1, max_length=128)
+
+
+class PromotedAttestationRef(BaseModel):
+    """An attested face that an operator already promoted into enrollment prototypes."""
+
+    candidate_id: str
+    person_id: str | None = None
+    pose_bin: Literal["frontal", "left", "right", "down"] = "frontal"
+
+
+class RevokeAttestationsResponse(BaseModel):
+    association_id: str
+    revoked: int = Field(..., ge=0, description="Attested captures newly marked revoked")
+    total_revoked: int = Field(
+        ..., ge=0, description="Total attested captures of this association now marked revoked"
+    )
+    already_promoted: list[PromotedAttestationRef] = Field(
+        default_factory=list,
+        description=(
+            "Captures from this association already promoted into face prototypes; listed for "
+            "operator review and never removed automatically"
+        ),
+    )
+
+
+class AssociationAttestationCountsResponse(BaseModel):
+    association_id: str
+    total: int = Field(..., ge=0)
+    active: int = Field(..., ge=0)
+    revoked: int = Field(..., ge=0)
+    promoted: int = Field(..., ge=0)

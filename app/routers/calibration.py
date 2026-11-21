@@ -24,6 +24,7 @@ from app.calibration.attestation_audit import (
 )
 from app.calibration.episodes import EpisodeInput, assign_episodes, episode_label
 from app.models.calibration_review import (
+    AssociationAttestationCountsResponse,
     AttestationRequest,
     AttestationResponse,
     AttestedCandidateList,
@@ -39,6 +40,9 @@ from app.models.calibration_review import (
     LabelRequest,
     PromoteCandidateRequest,
     PromoteCandidateResponse,
+    PromotedAttestationRef,
+    RevokeAttestationsRequest,
+    RevokeAttestationsResponse,
 )
 from app.services.calibration_candidates import CalibrationCandidate, quality_decile
 from app.services.enrollment_store import PromotionConflictError, PromotionIneligibleError
@@ -84,6 +88,7 @@ def _view(
         policy=policy,
         already_promoted=promoted,
         audit_verdict=c.audit_verdict,
+        revoked=c.revoked_at is not None,
     )
     return CandidateView(
         candidate_id=c.candidate_id,
@@ -111,6 +116,8 @@ def _view(
         audit_verdict=c.audit_verdict,
         audited_by=c.audited_by,
         audited_at=c.audited_at,
+        revoked_at=c.revoked_at,
+        revoked_by=c.revoked_by,
     )
 
 
@@ -435,4 +442,61 @@ async def attestation_audit_summary(request: Request) -> AuditSummaryResponse:
         min_audited=MIN_AUDITED,
         min_precision_lower_bound=MIN_PRECISION_LOWER_BOUND,
         meets_bar=summary.meets_bar,
+    )
+
+
+@router.post("/attestations/revoke", response_model=RevokeAttestationsResponse)
+async def revoke_attestations(
+    request: Request, body: RevokeAttestationsRequest
+) -> RevokeAttestationsResponse:
+    """Revoke every wearable-attested face capture sourced from *association_id*.
+
+    Side effect: marks unrevoked attested captures for this association with ``revoked_at`` and
+    ``revoked_by``, excluding them from the audit sample, calibration manifest, and promotion,
+    and letting retention purge them with unaudited captures. Already-promoted prototypes are
+    never removed automatically; they are returned in ``already_promoted`` for operator review.
+    Idempotent on repeated calls for the same association.
+    """
+    newly_revoked, all_rows = await request.app.state.calibration_candidates.revoke_by_association(
+        body.association_id,
+        revoked_by=body.revoked_by,
+        revoked_at=datetime.now(UTC),
+    )
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    already_promoted = [
+        PromotedAttestationRef(
+            candidate_id=c.candidate_id,
+            person_id=c.label_identity_id,
+            pose_bin=pose_bin(c.yaw_deg, c.pitch_deg),
+        )
+        for c in all_rows
+        if c.candidate_id in promoted_ids
+    ]
+    total_revoked = sum(1 for c in all_rows if c.revoked_at is not None)
+    return RevokeAttestationsResponse(
+        association_id=body.association_id,
+        revoked=newly_revoked,
+        total_revoked=total_revoked,
+        already_promoted=already_promoted,
+    )
+
+
+@router.get("/attestations/counts", response_model=AssociationAttestationCountsResponse)
+async def association_attestation_counts(
+    request: Request,
+    association_id: str = Query(..., min_length=1, max_length=64),
+) -> AssociationAttestationCountsResponse:
+    """Read-only counts of attested face captures sourced from one association segment."""
+    rows = await request.app.state.calibration_candidates.list_attested(
+        association_id=association_id, include_revoked=True
+    )
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    revoked = sum(1 for c in rows if c.revoked_at is not None)
+    promoted = sum(1 for c in rows if c.candidate_id in promoted_ids)
+    return AssociationAttestationCountsResponse(
+        association_id=association_id,
+        total=len(rows),
+        active=len(rows) - revoked,
+        revoked=revoked,
+        promoted=promoted,
     )

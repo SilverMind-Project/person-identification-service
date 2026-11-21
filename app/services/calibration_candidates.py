@@ -73,6 +73,8 @@ class CalibrationCandidate:
     audit_verdict: AuditVerdict | None = None
     audited_by: str | None = None
     audited_at: datetime | None = None
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
 
     @property
     def bucket(self) -> BucketKey:
@@ -140,9 +142,28 @@ class CalibrationCandidateRepository(Protocol):
         ...
 
     async def list_attested(
-        self, *, audited: bool | None = None, identity_id: str | None = None
+        self,
+        *,
+        audited: bool | None = None,
+        identity_id: str | None = None,
+        association_id: str | None = None,
+        include_revoked: bool = False,
     ) -> list[CalibrationCandidate]:
-        """Attested candidates oldest first; *audited* None for all, else only (un)audited."""
+        """Attested candidates oldest first; excludes revoked rows unless *include_revoked*."""
+        ...
+
+    async def revoke_by_association(
+        self,
+        association_id: str,
+        *,
+        revoked_by: str,
+        revoked_at: datetime,
+    ) -> tuple[int, list[CalibrationCandidate]]:
+        """Mark unrevoked attested candidates of *association_id* revoked (idempotent).
+
+        Returns ``(newly_revoked_count, all_attested_for_association)`` so the caller can
+        report any rows that were already promoted into enrollment prototypes.
+        """
         ...
 
     async def audit(
@@ -153,7 +174,7 @@ class CalibrationCandidateRepository(Protocol):
         audited_by: str,
         audited_at: datetime,
     ) -> CalibrationCandidate | None:
-        """Record an audit verdict on an attested candidate; None when no attested row has that id."""
+        """Record an audit verdict on an unrevoked attested candidate; None when missing/revoked."""
         ...
 
     async def list_labeled(self) -> list[CalibrationCandidate]:
@@ -188,11 +209,11 @@ _COLUMNS = """candidate_id, captured_at, camera_id, source, crop_object_key, emb
     quality_components, capture_profile, interocular_px, yaw_deg, pitch_deg, nearest_person_id,
     nearest_similarity, label_state, label_identity_id, label_kind, label_source, labeled_by,
     labeled_at, attestation_association_id, attestation_grade, audit_verdict, audited_by,
-    audited_at"""
+    audited_at, revoked_at, revoked_by"""
 
 _SQL_INSERT = f"""INSERT INTO calibration_candidates ({_COLUMNS})
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15,
-        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)"""
+        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)"""
 
 _SQL_SELECT = f"SELECT {_COLUMNS} FROM calibration_candidates"
 
@@ -245,6 +266,8 @@ def _from_row(row: asyncpg.Record) -> CalibrationCandidate:
         audit_verdict=row["audit_verdict"],
         audited_by=row["audited_by"],
         audited_at=row["audited_at"],
+        revoked_at=row["revoked_at"],
+        revoked_by=row["revoked_by"],
     )
 
 
@@ -287,6 +310,8 @@ class PostgresCalibrationCandidateRepository:
                 c.audit_verdict,
                 c.audited_by,
                 c.audited_at,
+                c.revoked_at,
+                c.revoked_by,
             )
 
     async def get(self, candidate_id: str) -> CalibrationCandidate | None:
@@ -361,7 +386,8 @@ class PostgresCalibrationCandidateRepository:
                 """DELETE FROM calibration_candidates
                    WHERE (label_state IN ('unlabeled', 'rejected')
                           OR (label_state = 'attested'
-                              AND audit_verdict IS DISTINCT FROM 'correct'))
+                              AND (audit_verdict IS DISTINCT FROM 'correct'
+                                   OR revoked_at IS NOT NULL)))
                      AND captured_at < $1
                    RETURNING crop_object_key""",
                 captured_before,
@@ -402,7 +428,12 @@ class PostgresCalibrationCandidateRepository:
         return counts
 
     async def list_attested(
-        self, *, audited: bool | None = None, identity_id: str | None = None
+        self,
+        *,
+        audited: bool | None = None,
+        identity_id: str | None = None,
+        association_id: str | None = None,
+        include_revoked: bool = False,
     ) -> list[CalibrationCandidate]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -410,11 +441,43 @@ class PostgresCalibrationCandidateRepository:
                 WHERE label_state = 'attested'
                   AND ($1::boolean IS NULL OR (audit_verdict IS NOT NULL) = $1)
                   AND ($2::text IS NULL OR label_identity_id = $2)
+                  AND ($3::text IS NULL OR attestation_association_id = $3)
+                  AND ($4::boolean OR revoked_at IS NULL)
                 ORDER BY captured_at, candidate_id""",
                 audited,
                 identity_id,
+                association_id,
+                include_revoked,
             )
         return [_from_row(r) for r in rows]
+
+    async def revoke_by_association(
+        self,
+        association_id: str,
+        *,
+        revoked_by: str,
+        revoked_at: datetime,
+    ) -> tuple[int, list[CalibrationCandidate]]:
+        async with self._pool.acquire() as conn, conn.transaction():
+            updated_rows = await conn.fetch(
+                """UPDATE calibration_candidates
+                   SET revoked_at = $2, revoked_by = $3
+                   WHERE label_state = 'attested'
+                     AND attestation_association_id = $1
+                     AND revoked_at IS NULL
+                   RETURNING candidate_id""",
+                association_id,
+                revoked_at,
+                revoked_by,
+            )
+            all_rows = await conn.fetch(
+                f"""{_SQL_SELECT}
+                WHERE label_state = 'attested'
+                  AND attestation_association_id = $1
+                ORDER BY captured_at, candidate_id""",
+                association_id,
+            )
+        return (len(updated_rows), [_from_row(r) for r in all_rows])
 
     async def audit(
         self,
@@ -428,7 +491,9 @@ class PostgresCalibrationCandidateRepository:
             row = await conn.fetchrow(
                 f"""UPDATE calibration_candidates
                 SET audit_verdict = $2, audited_by = $3, audited_at = $4
-                WHERE candidate_id = $1::uuid AND label_state = 'attested'
+                WHERE candidate_id = $1::uuid
+                  AND label_state = 'attested'
+                  AND revoked_at IS NULL
                 RETURNING {_COLUMNS}""",
                 candidate_id,
                 verdict,
@@ -534,7 +599,10 @@ class InMemoryCalibrationCandidateRepository:
             if c.captured_at < captured_before
             and (
                 c.label_state in ("unlabeled", "rejected")
-                or (c.label_state == "attested" and c.audit_verdict != "correct")
+                or (
+                    c.label_state == "attested"
+                    and (c.audit_verdict != "correct" or c.revoked_at is not None)
+                )
             )
         ]
         for c in expired:
@@ -562,7 +630,12 @@ class InMemoryCalibrationCandidateRepository:
         return counts
 
     async def list_attested(
-        self, *, audited: bool | None = None, identity_id: str | None = None
+        self,
+        *,
+        audited: bool | None = None,
+        identity_id: str | None = None,
+        association_id: str | None = None,
+        include_revoked: bool = False,
     ) -> list[CalibrationCandidate]:
         return sorted(
             (
@@ -571,9 +644,37 @@ class InMemoryCalibrationCandidateRepository:
                 if c.label_state == "attested"
                 and (audited is None or (c.audit_verdict is not None) == audited)
                 and (identity_id is None or c.label_identity_id == identity_id)
+                and (association_id is None or c.attestation_association_id == association_id)
+                and (include_revoked or c.revoked_at is None)
             ),
             key=_sort_key,
         )
+
+    async def revoke_by_association(
+        self,
+        association_id: str,
+        *,
+        revoked_by: str,
+        revoked_at: datetime,
+    ) -> tuple[int, list[CalibrationCandidate]]:
+        newly_revoked = 0
+        for cid, c in list(self._rows.items()):
+            if (
+                c.label_state == "attested"
+                and c.attestation_association_id == association_id
+                and c.revoked_at is None
+            ):
+                self._rows[cid] = replace(c, revoked_at=revoked_at, revoked_by=revoked_by)
+                newly_revoked += 1
+        all_rows = sorted(
+            (
+                c
+                for c in self._rows.values()
+                if c.label_state == "attested" and c.attestation_association_id == association_id
+            ),
+            key=_sort_key,
+        )
+        return (newly_revoked, all_rows)
 
     async def audit(
         self,
@@ -584,7 +685,7 @@ class InMemoryCalibrationCandidateRepository:
         audited_at: datetime,
     ) -> CalibrationCandidate | None:
         current = self._rows.get(candidate_id)
-        if current is None or current.label_state != "attested":
+        if current is None or current.label_state != "attested" or current.revoked_at is not None:
             return None
         updated = replace(
             current, audit_verdict=verdict, audited_by=audited_by, audited_at=audited_at

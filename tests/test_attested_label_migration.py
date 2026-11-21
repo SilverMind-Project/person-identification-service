@@ -61,10 +61,13 @@ async def test_down_refuses_while_attested_rows_exist(pool: asyncpg.Pool) -> Non
     embedding[0] = 1.0
     async with pool.acquire() as conn:
         await conn.execute(_INSERT_ATTESTED, str(uuid.uuid4()), embedding)
-    head = await _head(pool)
+    above = await _steps_to_0006(pool) - 1
+    if above > 0:
+        await rollback(pool, steps=above)
+    assert await _head(pool) == "0006_attested_label_state"
     with pytest.raises(asyncpg.RaiseError, match="attested rows"):
-        await rollback(pool, steps=await _steps_to_0006(pool))
-    assert await _head(pool) == head
+        await rollback(pool, steps=1)
+    assert await _head(pool) == "0006_attested_label_state"
 
 
 async def test_down_and_up_round_trip_without_attested_rows(pool: asyncpg.Pool) -> None:

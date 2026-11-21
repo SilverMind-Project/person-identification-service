@@ -134,7 +134,7 @@ def _admit_attested(
     The bar is checked here, in the builder, so no caller or setting can include machine labels
     that an audit has not vouched for. Captures an auditor marked wrong or not a face never enter.
     """
-    attested = [c for c in candidates if c.label_state == "attested"]
+    attested = [c for c in candidates if c.label_state == "attested" and c.revoked_at is None]
     if not attested:
         return []
     if attestation_audit is None or not attestation_audit.meets_bar:

@@ -264,6 +264,7 @@ class EnrollmentStore:
             policy=self._prototype_policy,
             already_promoted=already_promoted,
             audit_verdict=candidate.audit_verdict,
+            revoked=candidate.revoked_at is not None,
         )
         if reason == "already_promoted":
             raise PromotionConflictError(reason, "candidate has already been promoted")

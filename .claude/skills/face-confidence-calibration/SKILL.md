@@ -105,7 +105,11 @@ be ignored by Git. Commit only schemas, synthetic examples, loaders, and tests.
   the builder's audit gate (`app/calibration/attestation_audit.py`: at least 200 audited from a
   uniform random sample, Wilson 95% lower bound of precision 0.99 or better; fixed in code, not
   settings), and captures audited wrong never enter. An operator may promote one; nothing else
-  moves it toward recognition.
+  moves it toward recognition. When tracking-orchestrator revokes a wearable association segment
+  (`POST /api/v1/calibration/attestations/revoke`, migration `0007`), matching rows are stamped
+  `revoked_at` and `revoked_by`, excluded from manifests, audit samples, audit summaries, and
+  promotion (`attestation_revoked`), and purged by retention even if previously audited `correct`.
+  Already-promoted face prototypes are returned for manual review and never removed automatically.
 - **Episodes.** A maximal run of captures with one label on one camera with gaps under
   `episode_gap_s` (300 s; `app/calibration/episodes.py`). Household data splits by episode
   (60/20/20, stratified per label, seeded); an episode carrying two labels is reported as leakage.
