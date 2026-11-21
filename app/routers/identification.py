@@ -27,6 +27,7 @@ from app.services.calibration_capture import CaptureContext as CalibrationCaptur
 from app.services.face_engine import decode_base64_image
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.image_annotator import annotate_image
+from app.services.recognizer_profile import load_active_recognizer_profile
 from app.services.template_aggregation import encode_embedding_f16
 from app.services.visitor_store import VisitorStore
 
@@ -91,10 +92,33 @@ def _calibration_features(r: IdentifyResult) -> dict[str, float]:
     return features
 
 
+def _active_versions(engine: object) -> tuple[str, str, str]:
+    """Return (recognizer_version, model_profile, preprocessing_version) from engine or config."""
+    recognizer_version = getattr(engine, "recognizer_version", None)
+    if not recognizer_version:
+        recognizer_version = str(
+            config.get("calibration.recognizer_version")
+            or config.get("calibration.arcface_model_version")
+            or load_active_recognizer_profile(
+                config.get("face_engine", {}) or {}
+            ).recognizer_version
+        )
+    model_profile = str(getattr(engine, "model_profile", ""))
+    preprocessing_version = getattr(engine, "preprocessing_version", None)
+    if not preprocessing_version:
+        preprocessing_version = str(
+            config.get("calibration.preprocessing_version")
+            or load_active_recognizer_profile(
+                config.get("face_engine", {}) or {}
+            ).preprocessing_version
+        )
+    return str(recognizer_version), model_profile, str(preprocessing_version)
+
+
 def _make_face_detection(
     r,
     evaluator,
-    active_arcface_version: str,
+    active_recognizer_version: str,
     active_model_profile: str,
     active_preprocessing_version: str,
     embedding: np.ndarray | None = None,
@@ -147,11 +171,12 @@ def _make_face_detection(
         calibration_status=evaluator.health(),
         calibration_profile=evaluator.calibration_profile(),
         calibration_artifact_version=evaluator.artifact_version(),
-        arcface_model_version=active_arcface_version,
+        recognizer_version=active_recognizer_version,
+        arcface_model_version=active_recognizer_version,
         model_profile=active_model_profile,
         preprocessing_version=active_preprocessing_version,
         embedding_f16_b64=encode_embedding_f16(embedding) if embedding is not None else None,
-        embedding_model_version=active_arcface_version if embedding is not None else None,
+        embedding_model_version=active_recognizer_version if embedding is not None else None,
     )
 
 
@@ -187,9 +212,9 @@ async def identify(request: Request, body: IdentifyRequest):
     engine = request.app.state.face_engine
     store = request.app.state.enrollment_store
     evaluator = request.app.state.calibration_evaluator
-    active_arcface_version = str(config.get("calibration.arcface_model_version", ""))
-    active_model_profile = str(engine.model_profile)
-    active_preprocessing_version = str(config.get("calibration.preprocessing_version", ""))
+    active_recognizer_version, active_model_profile, active_preprocessing_version = (
+        _active_versions(engine)
+    )
 
     image = decode_base64_image(body.image)
     faces = await engine.detect_faces(image)
@@ -218,7 +243,7 @@ async def identify(request: Request, body: IdentifyRequest):
             _make_face_detection(
                 r,
                 evaluator,
-                active_arcface_version,
+                active_recognizer_version,
                 active_model_profile,
                 active_preprocessing_version,
                 embedding=face.embedding if body.return_embedding else None,
@@ -257,9 +282,9 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
     store = request.app.state.enrollment_store
     motion_detector = request.app.state.motion_detector
     evaluator = request.app.state.calibration_evaluator
-    active_arcface_version = str(config.get("calibration.arcface_model_version", ""))
-    active_model_profile = str(engine.model_profile)
-    active_preprocessing_version = str(config.get("calibration.preprocessing_version", ""))
+    active_recognizer_version, active_model_profile, active_preprocessing_version = (
+        _active_versions(engine)
+    )
 
     frames: list[FrameResult] = []
     all_faces: list[list] = []
@@ -303,7 +328,7 @@ async def identify_batch(request: Request, body: BatchIdentifyRequest):
                     _make_face_detection(
                         r,
                         evaluator,
-                        active_arcface_version,
+                        active_recognizer_version,
                         active_model_profile,
                         active_preprocessing_version,
                     )

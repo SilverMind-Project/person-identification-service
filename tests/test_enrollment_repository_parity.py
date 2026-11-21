@@ -229,3 +229,52 @@ async def test_prototype_methods_match_between_in_memory_and_postgres(
 
     assert mem_record == pg_record
     assert np.allclose(mem_sims, pg_sims, atol=1e-5)
+
+
+async def _exercise_version_isolation(
+    repo_a: EnrollmentRepository, repo_b: EnrollmentRepository
+) -> dict[str, object]:
+    await repo_a.upsert_member("p-alpha", "Alpha")
+    await repo_a.insert_embeddings(
+        "p-alpha",
+        [MemberEmbedding(embedding=_GALLERY["p-alpha"][1][0], pose_bin="frontal")],
+    )
+    await repo_a.recompute_centroid("p-alpha")
+    await repo_a.rebuild_prototypes("p-alpha")
+
+    await repo_b.replace_profile_embeddings(
+        "p-alpha",
+        [MemberEmbedding(embedding=_GALLERY["p-beta"][1][0], pose_bin="left")],
+    )
+
+    hits_a_on_a = await repo_a.nearest_centroids(_GALLERY["p-alpha"][1][0], k=2)
+    hits_b_on_b = await repo_b.nearest_centroids(_GALLERY["p-beta"][1][0], k=2)
+    protos_a = await repo_a.list_prototypes("p-alpha")
+    protos_b = await repo_b.list_prototypes("p-alpha")
+    return {
+        "counts": (
+            await repo_a.embedding_count("p-alpha"),
+            await repo_b.embedding_count("p-alpha"),
+        ),
+        "versions": (repo_a.recognizer_version, repo_b.recognizer_version),
+        "hits_a": [(h.person_id, round(h.similarity, 4)) for h in hits_a_on_a],
+        "hits_b": [(h.person_id, round(h.similarity, 4)) for h in hits_b_on_b],
+        "proto_bins_a": [p.pose_bin for p in protos_a],
+        "proto_bins_b": [p.pose_bin for p in protos_b],
+        "proto_ids_distinct": protos_a[0].prototype_id != protos_b[0].prototype_id,
+    }
+
+
+async def test_recognizer_version_isolation_matches_between_in_memory_and_postgres(
+    postgres: PostgresEnrollmentRepository,
+) -> None:
+    pg_alt = PostgresEnrollmentRepository(
+        postgres._pool, recognizer_version="adaface_ir50_webface4m"
+    )
+    mem_base = InMemoryEnrollmentRepository("buffalo_l")
+    mem_alt = mem_base.for_recognizer_version("adaface_ir50_webface4m")
+
+    pg_rec = await _exercise_version_isolation(postgres, pg_alt)
+    mem_rec = await _exercise_version_isolation(mem_base, mem_alt)
+    assert mem_rec == pg_rec
+    assert pg_rec["proto_ids_distinct"] is True

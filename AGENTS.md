@@ -18,8 +18,8 @@ Callers: tracking-orchestrator sends one person crop per `POST /api/v1/identify`
 
 Two characteristics make this service non-trivial:
 
-1. **Remote model lifecycle.** All five Buffalo_L graphs are served by Triton. Startup fails unless every configured model is ready.
-2. **Vector similarity search.** Face identification uses nearest-centroid search against a pgvector DiskANN index, replacing the older in-memory `.npy` gallery approach. The database is the source of truth for enrollment state.
+1. **Remote model lifecycle.** All five graphs configured by the active `RecognizerProfile` (`face_engine.active_profile`, default `buffalo_l`) are served by Triton. Startup fails unless every configured model is ready.
+2. **Vector similarity search.** Face identification uses nearest-centroid or pose-binned prototype search against pgvector, scoped by `recognizer_version`. The database is the source of truth for enrollment state.
 
 ---
 
@@ -54,6 +54,7 @@ person-identification-service/
 │   │   ├── evaluator.py     # Runtime evaluator (stdlib + numpy only); health states
 │   │   ├── fit.py           # Offline fitter (scikit-learn; calibration-tools extra)
 │   │   ├── quality_breakpoints.py # Offline face quality anchor analysis (scipy; calibration-tools)
+│   │   ├── recognizer_eval.py # Deterministic household comparison harness for recognizer swaps (Part B)
 │   │   └── cli.py           # fit / evaluate / inspect / validate / build-manifest / fit-v2 commands
 │   ├── db/
 │   │   └── migrate.py       # asyncpg migration runner (applies migrations/*.up.sql)
@@ -73,7 +74,8 @@ person-identification-service/
 │   │   ├── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
 │   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete, promote; /calibration/summary; /calibration/attestations (wearable-attested faces, audit)
 │   ├── services/
-│   │   ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
+│   │   ├── recognizer_profile.py # Frozen RecognizerProfile registry (Triton models, alignment, normalization, licence)
+│   │   ├── face_engine.py     # Triton preprocessing, inference, and postprocessing (profile-driven)
 │   │   ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
 │   │   ├── face_geometry.py   # Face box size and interocular distance (pure)
 │   │   ├── face_quality.py    # Face image quality scorer protocol + heuristic-v1 (pure)
@@ -90,14 +92,18 @@ person-identification-service/
 │   │   ├── guest_store.py     # MinIO uploads for unidentified-person frames
 │   │   └── image_annotator.py # Bounding box + label drawing
 │   └── tools/
-│       └── rebuild_prototypes.py # CLI to backfill pose bins and rebuild face_prototypes for all members
+│       ├── rebuild_prototypes.py # CLI to backfill pose bins and rebuild face_prototypes for all members
+│       └── reembed.py       # CLI to re-embed retained enrollment crops under a target RecognizerProfile
 ├── config/
 │   └── settings.yaml        # All application settings
 ├── scripts/
 │   ├── calibrate_face_quality.py # Offline: suggest face quality ramp anchors from labeled images
+│   ├── evaluate_recognizer_swap.py # Offline: deterministic household comparison of candidate recognizers
 │   └── check-no-em-dash.sh  # Markdown em-dash gate (make check-md)
 ├── schemas/
-│   └── calibration_artifact.schema.json
+│   ├── calibration_artifact.schema.json
+│   ├── calibration_artifact_v2.schema.json
+│   └── recognizer_comparison_report.schema.json
 ├── migrations/
 │   └── 0001_initial_schema.up.sql  # Frozen baseline; new changes are 0002+ (see section 8)
 ├── tests/                   # See section 9
@@ -131,6 +137,10 @@ uv run --extra calibration-tools python -m app.calibration.cli validate --artifa
 # Schema 2 from household labels (read-only DB access; manifests hold private data)
 uv run --extra calibration-tools python -m app.calibration.cli build-manifest --output manifest.jsonl
 uv run --extra calibration-tools python -m app.calibration.cli fit-v2 --manifest manifest.jsonl --output artifact.json --allow-household-only
+# Re-embed retained enrollment crops for a candidate RecognizerProfile (parallel gallery)
+DATABASE_URL=... TRITON_GRPC_URL=triton:8701 uv run python -m app.tools.reembed --profile adaface_ir50_webface4m
+# Deterministic household comparison of candidate recognizers
+uv run --extra calibration-tools python scripts/evaluate_recognizer_swap.py --baseline-scores base.json --candidate-scores cand.json --candidate-profile adaface_ir50_webface4m --output report.json
 
 # Quality gate: `make check` runs ruff check, ruff format --check, mypy app/, and the full
 # suite with the dev and calibration-tools extras (uv run --frozen, so uv.lock never churns).
@@ -203,10 +213,10 @@ In `app.main` lifespan (order matters):
 2. `_init_pool(dsn)`: asyncpg pool with the `pgvector` codec registered (`min_size=1, max_size=5`)
 3. `run_migrations(pool)`: applies pending `migrations/*.up.sql` files transactionally
 4. `create_minio_client()`: MinIO client with bucket ensured
-5. Open `TritonGrpcClient`, build `FaceEngine`, and require all five configured models to be ready
-6. `EnrollmentStore(PostgresEnrollmentRepository(pool), face_engine, MatchThresholds(...))` (thresholds from `recognition.*`), `MotionDetector()`, `GuestImageStore(pool, minio_client)`
-7. `VisitorStore(pool, minio_client)`, `CalibrationCaptureService` (started; seeds today's caps and runs its worker only when `calibration_capture.enabled`), plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters and expired calibration captures)
-8. `CalibrationEvaluator.from_artifact_path(...)` with the expected ArcFace model, model profile, preprocessing, and quality scorer versions; a missing or incompatible artifact yields a degraded evaluator, never a startup failure. A second evaluator loads `calibration.template_artifact_path` for the `template` profile, bound to the template aggregator's version; `TemplateMatchService` (the same `PostgresEnrollmentRepository`, `QualityWeightedMeanAggregator`, and `MatchThresholds` from `recognition.template_*`) serves `/match-template`
+5. Load the active `RecognizerProfile` from `face_engine.active_profile` and `face_engine.profiles` (`app/services/recognizer_profile.py`), open `TritonGrpcClient`, build `FaceEngine(triton_client, profile=..., quality_scorer=...)`, and require all five profile-configured models to be ready
+6. `EnrollmentStore(PostgresEnrollmentRepository(pool, recognizer_version=profile.recognizer_version), face_engine, MatchThresholds(...), minio_client=minio_client, on_member_removed=...)`, `MotionDetector()`, `GuestImageStore(pool, minio_client)`
+7. `VisitorStore(pool, minio_client, recognizer_version=profile.recognizer_version)`, `CalibrationCaptureService` (started; seeds today's caps and runs its worker only when `calibration_capture.enabled`), plus the daily retention task (`_retention_loop`, purges expired unnamed visitor clusters and expired calibration captures)
+8. `CalibrationEvaluator.from_artifact_path(...)` with the expected `recognizer_version` (defaulting to the active profile), `model_profile`, `preprocessing_version`, and profile-scoped `quality_version`; a missing or incompatible artifact yields a degraded evaluator, never a startup failure. A second evaluator loads `calibration.template_artifact_path` for the `template` profile, bound to the template aggregator's version; `TemplateMatchService` (the same profile-scoped `PostgresEnrollmentRepository`, `QualityWeightedMeanAggregator`, and `MatchThresholds` from `recognition.template_*`) serves `/match-template`
 9. Store on `app.state`: `face_engine`, `triton_client`, `enrollment_store`, `template_matcher`, `face_quality_version`, `motion_detector`, `guest_store`, `visitor_store`, `calibration_candidates`, `calibration_capture`, `calibration_evaluator`, `template_calibration_evaluator`
 10. On shutdown: cancel the retention task, stop the capture worker, close Triton, then close the database pool
 
@@ -230,6 +240,8 @@ Key settings:
 | Setting | Env var | Default | Description |
 | --- | --- | --- | --- |
 | `face_engine.triton_url` | `TRITON_GRPC_URL` | `triton:8701` | Triton gRPC endpoint |
+| `face_engine.active_profile` | `PERSON_ID_RECOGNIZER_PROFILE` | `buffalo_l` | Active `RecognizerProfile` key under `face_engine.profiles` |
+| `face_engine.profiles` | -- | `buffalo_l`, `adaface_ir50_webface4m` | Named recognizer profiles (Triton models, alignment template, color space, normalization, tensor names, licence) |
 | `face_engine.model_profile` | `PERSON_ID_MODEL_PROFILE` | `full` | Health metadata |
 | `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Request timeout |
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
@@ -269,21 +281,23 @@ Key settings:
 
 ### 6.1 FaceEngine (`app/services/face_engine.py`)
 
-Implements the Buffalo_L client contract over Triton. There is no local ONNX Runtime path and no partial-model fallback.
+Implements the active `RecognizerProfile` (`app/services/recognizer_profile.py`, default `buffalo_l`) contract over Triton. There is no local ONNX Runtime path and no partial-model fallback.
 
 ```python
-engine = FaceEngine(triton_client)
+engine = FaceEngine(triton_client, profile=profile, quality_scorer=scorer)
 await engine.validate_models()
 faces: list[DetectedFace] = await engine.detect_faces(image)
+embedding: np.ndarray = await engine.embed_aligned_crop(aligned_crop_bgr)
 similarity: float = FaceEngine.compute_similarity(emb1, emb2)  # static
 ```
 
 **Key details:**
 - `det_size: [640, 640]` is required by the SCRFD Triton contract
 - `det_threshold: 0.6` -- filters low-confidence detections
-- Returns `DetectedFace` with bounding box, normalized embedding, landmarks, pose, and attributes
-- SCRFD decode/NMS and ArcFace alignment remain client-side and are unit-tested; alignment runs once per face and the quality score is computed on the aligned crop
-- `align_face(image, keypoints)` is a module function returning the 112x112 aligned BGR crop (also used by `scripts/calibrate_face_quality.py`)
+- Returns `DetectedFace` with bounding box, normalized embedding, landmarks, pose, attributes, and `aligned_crop_bgr` (112x112 aligned BGR crop, excluded from repr/compare, used by enrollment crop retention)
+- Alignment template, input size, color space (`rgb` or `bgr`), normalization mean/std, and recognition input/output tensor names all come from `RecognizerProfile`; `landmark_3d_model` stays independent of `recognition_model` so head-pose Euler angles stay stable across recognizer swaps
+- Quality version is scoped via `profile.scoped_quality_version(base_version)`: `buffalo_l` keeps `"heuristic-v1"`, while non-default profiles emit `"heuristic-v1@<recognizer_version>"` so quality consumers fail closed on a switch
+- `embed_aligned_crop(aligned_crop_bgr)` embeds an already-aligned crop for offline re-embedding (`app/tools/reembed.py`)
 - `compute_similarity` is `np.dot(emb1, emb2)` (valid because embeddings are normalized)
 
 ### 6.2 EnrollmentStore (`app/services/enrollment_store.py`)
@@ -303,10 +317,9 @@ Orchestrates enrollment and identification. It holds no SQL and reads no configu
 **Enroll flow:**
 1. Check whether the member exists and how many embeddings it has (reported if every image fails)
 2. For each image: await `engine.detect_faces()`, then pick the largest face by bbox area
-3. `upsert_member` (reports "enrolled" or "updated"), `insert_embeddings`, `recompute_centroid`
-   (mean of all the member's embeddings, L2-normalized, upserted into `centroids`)
+3. `upsert_member` (reports "enrolled" or "updated"), `insert_embeddings` (returns generated `BIGINT` ids), encode each `aligned_crop_bgr` as PNG and upload to MinIO under `enrollment/<person_id>/<embedding_id>.png` (`set_embedding_crop_key`), `recompute_centroid` (mean of the member's embeddings for the active `recognizer_version`, L2-normalized, upserted into `centroids`), and rebuild pose-binned prototypes
 
-**Members:** `list_members()` (with embedding counts), `remove_member(person_id)` (CASCADE removes embeddings and centroid), and `member_count()`.
+**Members:** `list_members()` (with embedding counts for the active `recognizer_version`), `remove_member(person_id)` (CASCADE removes embeddings, centroids, and prototypes; also deletes `enrollment/<person_id>/` in MinIO and runs `on_member_removed` to purge calibration candidates/crops), and `member_count()`. Promoting a calibration candidate copies its crop to `enrollment/<person_id>/<embedding_id>.png` so promoted exemplars survive calibration purges and participate in `reembed`.
 
 **Identify flow:** `nearest_centroids(embedding, k=1)` (pgvector `<=>` cosine distance, DiskANN
 index on `centroids.centroid`), then `classify_match`.
@@ -412,7 +425,7 @@ Domain endpoints are under `/api/v1`. Health and metrics are at the root. There 
 
 | Method | Path | Response |
 | --- | --- | --- |
-| `GET` | `/health` | `status`, `inference_backend`, `triton_endpoint`, `model_profile`, `enrolled_members`, `model`, `models`, `calibration` (`status`, `artifact_version`, `arcface_model_version`, `preprocessing_version`, `profile`, `quality_version`, `covered_identities`), and `template_calibration` (the same for the template artifact, plus `aggregation`) |
+| `GET` | `/health` | `status`, `inference_backend`, `triton_endpoint`, `model_profile`, `active_profile`, `recognizer_version`, `licence`, `enrolled_members`, `model`, `models`, `calibration` (`status`, `artifact_version`, `recognizer_version`, `arcface_model_version`, `preprocessing_version`, `profile`, `quality_version`, `covered_identities`), and `template_calibration` (the same for the template artifact, plus `aggregation`) |
 | `GET` | `/metrics` | Prometheus text format |
 
 ### Enrollment
@@ -552,7 +565,9 @@ Tables added on top of the core tables:
 | `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed, attributed), centroid, and review record |
 | `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
 | `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003); wearable-attested state, grade, association, and audit (0006); revocation timestamps and actor (0007) |
-| `face_prototypes` | Regular | Pose-binned face prototypes (`frontal`, `left`, `right`, `down`) per member, exact search, `ON DELETE CASCADE` (0005) |
+| `face_prototypes` | Regular | Pose-binned face prototypes (`frontal`, `left`, `right`, `down`) per member and `recognizer_version`, exact search, `ON DELETE CASCADE` (0005, 0008) |
+
+Migration `0008_recognizer_version` adds `recognizer_version TEXT NOT NULL DEFAULT 'buffalo_l'` to all six embedding-bearing tables (`embeddings`, `centroids` with composite `PRIMARY KEY (person_id, recognizer_version)`, `face_prototypes`, `calibration_candidates`, `visitor_clusters`, and `visitor_sightings`). Its down migration refuses rollback while any table contains rows with `recognizer_version <> 'buffalo_l'`.
 
 List every migration with `ls migrations`.
 
@@ -603,7 +618,7 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_visitor_policy.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`, `tests/test_wearable_attestation.py`, `tests/test_attested_label_migration.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_visitor_policy.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`, `tests/test_wearable_attestation.py`, `tests/test_attested_label_migration.py`, `tests/test_attestation_revocation.py`, `tests/test_recognizer_profile.py`, `tests/test_enrollment_crop_retention_and_reembed.py`, `tests/test_recognizer_eval.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
 
 ### Fixtures
 
@@ -658,12 +673,17 @@ async def pool():
 2. Write idempotent DDL (use `IF NOT EXISTS`, `IF EXISTS` where appropriate).
 3. The migration runs automatically at next startup via the lifespan. Never edit `0001_initial_schema` and never drop the database to apply a change: enrollment and visitor data are irreplaceable.
 
-### 10.4 Upgrade the Buffalo_L models
+### 10.4 Upgrade or swap the face recognizer profile
 
-1. Export the full models into `continuous-tracking/triton-models`.
-2. Generate and validate the INT8 variants in `triton-models-jetson`.
-3. The embedding dimension may change (buffalo_l uses 512-dim ArcFace). If it changes, you need a new migration to ALTER the vector column dimension and rebuild the DiskANN index.
-4. Re-enroll all members (embeddings from the old model are incompatible).
+1. Export the ONNX graph and Triton model config into `continuous-tracking/triton-models/` (for AdaFace IR-50, use `continuous-tracking/triton-models/scripts/export_adaface_onnx.py`; generate and validate Jetson INT8 variants in `triton-models-jetson` when targeting Jetson).
+2. Add or verify the profile entry under `face_engine.profiles.<name>` in `config/settings.yaml` (all five Triton model names, `input_size_px`, `alignment_template`, `embedding_dim`, `color_space`, `normalization_mean`, `normalization_std`, `recognition_input_name`, `recognition_output_name`, `preprocessing_version`, and `licence`). Keeping `landmark_3d_model` unchanged preserves validated head-pose Euler angles.
+3. If `embedding_dim` differs from 512, add a new migration for the new vector column dimension before running `reembed`.
+4. Populate a parallel gallery from retained aligned enrollment crops without disturbing the active recognizer:
+   `DATABASE_URL=... TRITON_GRPC_URL=triton:8701 uv run python -m app.tools.reembed --profile <name>`
+   Check the reported `skipped_without_crop` count and re-enroll any legacy member who predated crop retention.
+5. Evaluate on household labeled holdout captures with `scripts/evaluate_recognizer_swap.py` before switching.
+6. Switch `face_engine.active_profile` to `<name>`. Existing calibration artifacts automatically report `degraded_incompatible` (both `recognizer_version` and the profile-scoped `quality_version` change), and Cognitive Companion's Identity Setup `artifact` step blocks until you refit and redeploy single-frame and template calibration artifacts for `<name>` and update `face_id.expected_recognizer_version` and `face_id.expected_quality_version` in `continuous-tracking/tracking-orchestrator/config/settings.yaml`.
+7. To roll back, restore `face_engine.active_profile: buffalo_l`, the previous calibration artifacts, and CTS's expected versions; the original `buffalo_l` gallery rows remain intact in Postgres.
 
 ---
 

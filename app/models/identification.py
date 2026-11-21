@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 
 class FaceQualityModel(BaseModel):
@@ -102,20 +102,35 @@ class FaceDetection(BaseModel):
             "this endpoint's per-face calibration; empty when no artifact is loaded"
         ),
     )
-    arcface_model_version: str = Field(default="")
+    recognizer_version: str = Field(
+        default="",
+        description="Active face recognizer version that produced the embedding and similarity",
+    )
+    arcface_model_version: str = Field(
+        default="",
+        description="Deprecated alias of recognizer_version, kept for one release",
+    )
     model_profile: str = Field(default="")
     preprocessing_version: str = Field(default="")
     # Set only when the request asked for it (``/identify`` with ``return_embedding``).
     embedding_f16_b64: str | None = Field(
         default=None,
         description=(
-            "The face's ArcFace embedding: 512 little-endian float16 values, base64. Biometric "
+            "The face's embedding: 512 little-endian float16 values, base64. Biometric "
             "data for a follow-up /match-template call; callers must not log or persist it"
         ),
     )
     embedding_model_version: str | None = Field(
-        default=None, description="ArcFace model version of embedding_f16_b64"
+        default=None, description="Recognizer version of embedding_f16_b64"
     )
+
+    @model_validator(mode="after")
+    def _sync_recognizer_version(self) -> FaceDetection:
+        if self.recognizer_version and not self.arcface_model_version:
+            self.arcface_model_version = self.recognizer_version
+        elif self.arcface_model_version and not self.recognizer_version:
+            self.recognizer_version = self.arcface_model_version
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

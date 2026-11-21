@@ -11,7 +11,7 @@ from app.services.calibration_capture import (
     CaptureVersions,
 )
 
-VERSIONS = CaptureVersions(arcface_model_version="buffalo_l", preprocessing_version="v1")
+VERSIONS = CaptureVersions(recognizer_version="buffalo_l", preprocessing_version="v1")
 
 
 class InMemoryCropStore:
@@ -24,6 +24,15 @@ class InMemoryCropStore:
     async def delete(self, keys: Sequence[str]) -> None:
         for key in keys:
             self.objects.pop(key, None)
+
+    async def get_bytes(self, key: str) -> bytes | None:
+        return self.objects.get(key)
+
+    async def delete_prefix(self, prefix: str) -> list[str]:
+        removed = sorted(k for k in self.objects if k.startswith(prefix))
+        for k in removed:
+            del self.objects[k]
+        return removed
 
 
 def disabled_capture() -> CalibrationCaptureService:

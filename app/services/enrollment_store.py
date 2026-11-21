@@ -9,17 +9,19 @@ fields onto results.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
+import cv2
 import numpy as np
 
 from app.models.enrollment import EnrollResult, MemberInfo
 from app.observability.metrics import gallery_representation_shadow_total
 from app.services.calibration_candidates import CalibrationCandidate
 from app.services.enrollment_repository import EnrollmentRepository
+from app.services.face_engine import align_face
 from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.match_policy import MatchDecision, MatchThresholds, classify_match
 from app.services.prototype_builder import (
@@ -63,6 +65,24 @@ class PromotionResult:
     prototypes: list[Prototype]
 
 
+ENROLLMENT_CROP_PREFIX = "enrollment"
+
+
+def enrollment_crop_key(person_id: str, embedding_id: int) -> str:
+    """Canonical MinIO key for a retained aligned enrollment or promoted face crop."""
+    return f"{ENROLLMENT_CROP_PREFIX}/{person_id}/{embedding_id}.png"
+
+
+class EnrollmentCropStore(Protocol):
+    async def put_png(self, key: str, data: bytes) -> None: ...
+
+    async def get_bytes(self, key: str) -> bytes | None: ...
+
+    async def delete_prefix(self, prefix: str) -> list[str]: ...
+
+    async def delete(self, keys: Sequence[str]) -> None: ...
+
+
 class FaceEngineProtocol(Protocol):
     async def detect_faces(self, image: np.ndarray) -> list[DetectedFace]: ...
 
@@ -97,6 +117,9 @@ class EnrollmentStore:
         gallery_representation: GalleryRepresentationMode = "centroid",
         prototype_policy: PrototypePolicy = PrototypePolicy(),
         on_member_removed: Callable[[str], Awaitable[object]] | None = None,
+        crop_store: EnrollmentCropStore | None = None,
+        alignment_template: np.ndarray | None = None,
+        input_size_px: int = 112,
     ) -> None:
         self._repository = repository
         self._engine = face_engine
@@ -104,6 +127,9 @@ class EnrollmentStore:
         self._gallery_representation: GalleryRepresentationMode = gallery_representation
         self._prototype_policy = prototype_policy
         self._on_member_removed = on_member_removed
+        self._crop_store = crop_store
+        self._alignment_template = alignment_template
+        self._input_size_px = input_size_px
 
     @property
     def gallery_representation_mode(self) -> GalleryRepresentationMode:
@@ -134,6 +160,7 @@ class EnrollmentStore:
         )
 
         records: list[MemberEmbedding] = []
+        aligned_crops: list[np.ndarray | None] = []
         failed_indices: list[int] = []
         for idx, img in enumerate(images):
             faces = await self._engine.detect_faces(img)
@@ -144,6 +171,17 @@ class EnrollmentStore:
                 faces,
                 key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
             )
+            aligned_crop: np.ndarray | None = None
+            if self._crop_store is not None:
+                if best_face.aligned_crop_bgr is not None:
+                    aligned_crop = best_face.aligned_crop_bgr
+                elif best_face.keypoints_5_px is not None:
+                    aligned_crop = align_face(
+                        img,
+                        best_face.keypoints_5_px,
+                        template=self._alignment_template,
+                        output_size_px=self._input_size_px,
+                    )
             records.append(
                 MemberEmbedding(
                     embedding=best_face.embedding,
@@ -153,6 +191,7 @@ class EnrollmentStore:
                     quality_version=best_face.quality.version if best_face.quality else None,
                 )
             )
+            aligned_crops.append(aligned_crop)
 
         if not records:
             return EnrollResult(
@@ -164,7 +203,22 @@ class EnrollmentStore:
             )
 
         status = await self._repository.upsert_member(person_id, name)
-        await self._repository.insert_embeddings(person_id, records)
+        embedding_ids = await self._repository.insert_embeddings(person_id, records)
+        if self._crop_store is not None:
+            for emb_id, crop in zip(embedding_ids, aligned_crops, strict=True):
+                if crop is None:
+                    continue
+                ok, png = cv2.imencode(".png", crop)
+                if not ok:
+                    logger.warning(
+                        "Failed to encode enrollment crop person_id=%s embedding_id=%d",
+                        person_id,
+                        emb_id,
+                    )
+                    continue
+                key = enrollment_crop_key(person_id, emb_id)
+                await self._crop_store.put_png(key, png.tobytes())
+                await self._repository.set_embedding_crop_key(emb_id, key)
         if status == "updated":
             await self._repository.bump_gallery_revision(person_id)
         await self._repository.recompute_centroid(person_id)
@@ -297,6 +351,14 @@ class EnrollmentStore:
             approved_at=datetime.now(UTC),
             crop_object_key=candidate.crop_object_key,
         )
+        # Retain an independent copy of the aligned PNG under enrollment/<person_id>/<id>.png so
+        # deleting or purging the calibration candidate never orphans re-embedding source crops.
+        if self._crop_store is not None and candidate.crop_object_key:
+            crop_bytes = await self._crop_store.get_bytes(candidate.crop_object_key)
+            if crop_bytes is not None:
+                retained_key = enrollment_crop_key(target_id, embedding_id)
+                await self._crop_store.put_png(retained_key, crop_bytes)
+                await self._repository.set_embedding_crop_key(embedding_id, retained_key)
         await self._repository.recompute_centroid(target_id)
         prototypes = await self._repository.rebuild_prototypes(target_id, self._prototype_policy)
         member = await self._repository.get_member(target_id)
@@ -342,9 +404,11 @@ class EnrollmentStore:
         return await self._repository.get_member(person_id)
 
     async def remove_member(self, person_id: str) -> bool:
-        """Remove a member with all embeddings, prototypes, centroids, and calibration crops."""
+        """Remove a member with all embeddings, prototypes, centroids, enrollment and calibration crops."""
         deleted = await self._repository.remove_member(person_id)
         if deleted:
+            if self._crop_store is not None:
+                await self._crop_store.delete_prefix(f"{ENROLLMENT_CROP_PREFIX}/{person_id}/")
             if self._on_member_removed is not None:
                 await self._on_member_removed(person_id)
             logger.info("Removed member person_id=%s", person_id)

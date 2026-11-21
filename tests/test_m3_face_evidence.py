@@ -221,7 +221,7 @@ async def seeded_store(recognition_pool):
         )
         await conn.execute(
             "INSERT INTO centroids (person_id, centroid, updated_at) VALUES ($1, $2, now()) "
-            "ON CONFLICT (person_id) DO UPDATE SET centroid = excluded.centroid",
+            "ON CONFLICT (person_id, recognizer_version) DO UPDATE SET centroid = excluded.centroid",
             "alice",
             _alice_embedding().tolist(),
         )
@@ -232,7 +232,7 @@ async def seeded_store(recognition_pool):
         )
         await conn.execute(
             "INSERT INTO centroids (person_id, centroid, updated_at) VALUES ($1, $2, now()) "
-            "ON CONFLICT (person_id) DO UPDATE SET centroid = excluded.centroid",
+            "ON CONFLICT (person_id, recognizer_version) DO UPDATE SET centroid = excluded.centroid",
             "bob",
             _bob_embedding().tolist(),
         )

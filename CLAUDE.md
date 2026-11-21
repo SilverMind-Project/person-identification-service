@@ -59,14 +59,17 @@ any blocked command yourself with `!` if it is intended. `make hooks-test` is pa
 
 ## Non-negotiable invariants
 
-- Triton is the only inference path; startup fails unless all five Buffalo_L models are ready.
+- Triton is the only inference path; startup fails unless all five models configured by the active
+  `RecognizerProfile` (`face_engine.active_profile`, default `buffalo_l`) are ready.
 - Services are built in the `app.main` lifespan and read from `request.app.state`; never
   instantiated in routers.
 - Schema changes are new numbered `migrations/NNNN_name.up.sql` files with a matching
   `.down.sql`; `0001_initial_schema` is frozen; never drop the database to apply a change.
 - Enrollment gains entries only through explicit enroll calls, explicit operator naming of a
   visitor cluster, or explicit operator promotion of a labeled capture; calibration labels alone
-  never change the gallery.
+  never change the gallery. Aligned 112x112 enrollment and promoted crops are retained locally in
+  MinIO under `enrollment/<person_id>/<embedding_id>.png` for recognizer re-embedding and deleted
+  immediately when a member is removed.
 - `similarity` is a raw cosine score, never a probability; `calibrated_confidence` is null
   without a compatible artifact and never falls back to raw similarity.
 - Logging is stdlib `logging.getLogger(__name__)` by design (other repositories differ); never

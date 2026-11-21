@@ -27,7 +27,7 @@ Never name cosine similarity `confidence`, `probability`, or `certainty`.
 Identification responses expose both `raw_similarity` and nullable `calibrated_confidence`, plus:
 
 - calibration status and artifact version;
-- ArcFace model/profile version;
+- `recognizer_version` (canonical, with one-release `arcface_model_version` alias) and model profile;
 - preprocessing version;
 - recognition state;
 - face detection confidence separately.
@@ -56,9 +56,10 @@ all in [0, 1], or `null` for a face that was not scored.
   because the tracker applies its own frontality factor. Missing interocular distance scores
   resolution 0, never high.
 - The version string is the contract. Any change to anchors, weights, components, or the
-  aligned-crop preprocessing is a new version; a calibration artifact or downstream policy
-  conditioned on quality binds to the version it was fitted on and must be re-checked when it
-  changes.
+  aligned-crop preprocessing is a new version. `RecognizerProfile.scoped_quality_version` keeps
+  `heuristic-v1` for the baseline `buffalo_l` profile and qualifies every other profile as
+  `heuristic-v1@<recognizer_version>` so any recognizer switch automatically invalidates prior
+  calibration artifacts and downstream quality consumers until recalibrated.
 - Anchors are tuned offline with `scripts/calibrate_face_quality.py` (operator-labeled images,
   `FaceEngine` directly, read-only centroid query, never writes config) and the pure analysis in
   `app/calibration/quality_breakpoints.py` (scipy, `calibration-tools` extra only).
@@ -117,7 +118,8 @@ be ignored by Git. Commit only schemas, synthetic examples, loaders, and tests.
 - **Manifest** (`app/calibration/manifest.py`, CLI `build-manifest`, read-only database). Every
   usable probe is scored against every enrolled identity's centroid (leave-episode-out for its
   own identity), giving genuine, closed-set impostor, and open-set impostor records with the
-  quality features. Mixed quality versions, model versions, or capture profiles are refused.
+  quality features. `build-manifest --recognizer-version` filters captures to one recognizer and
+  refuses mixed quality versions, recognizer versions, or capture profiles.
   External images go through the same `FaceEngine` and scorer; precomputed features are never
   accepted; a licence sidecar is required.
 - **Fit v2** (`run_fit_v2`, CLI `fit-v2`): logistic regression on standardized features with
@@ -130,15 +132,17 @@ be ignored by Git. Commit only schemas, synthetic examples, loaders, and tests.
   genuine holdout faces. The runtime returns `calibrated_confidence = null` for any other
   identity, including one enrolled after the fit, so a roster change means recalibrating before
   that person gains authority. Never replace this allowlist with a list of excluded identities.
-- **Binding.** A schema 2 artifact binds to the ArcFace model, model profile, preprocessing
-  version, the face-quality scorer version (the injected scorer's `version`), its profile, and its
-  `gallery_representation` (`centroid` or `prototypes-v1`, default `centroid` for older artifacts);
-  any mismatch is `degraded_incompatible`. Both single-frame and template artifacts bind to
-  `gallery_representation`, so switching to `prototypes` requires refitting both. Artifacts also
-  record per-identity `gallery_revisions` at fit time; when promotion, enrollment update, or
-  prototype removal bumps a member's live revision, the evaluator drops that identity from coverage
-  (fail closed, logged once) until refit. Responses carry `calibration_profile`, and
-  tracking-orchestrator also checks the face's `quality.version`.
+- **Binding.** A schema 2 artifact binds to `recognizer_version` (mirrored to `arcface_model_version`
+  for one release), `model_profile`, `preprocessing_version`, the profile-scoped face-quality scorer
+  version (`heuristic-v1` for `buffalo_l`, `heuristic-v1@<recognizer_version>` otherwise), its
+  profile, and its `gallery_representation` (`centroid` or `prototypes-v1`, default `centroid` for
+  older artifacts); any mismatch is `degraded_incompatible`. Both single-frame and template
+  artifacts bind to `recognizer_version` and `gallery_representation`, so switching recognizers or
+  switching to `prototypes` requires refitting both. Artifacts also record per-identity
+  `gallery_revisions` at fit time; when promotion, enrollment update, or prototype removal bumps a
+  member's live revision, the evaluator drops that identity from coverage (fail closed, logged
+  once) until refit. Responses carry `calibration_profile` and `recognizer_version`, and
+  tracking-orchestrator also checks the face's `recognizer_version` and `quality.version`.
 - **Prototypes and margin.** `build-manifest --gallery prototypes-v1` scores probes leave-episode-out
   against pose-binned prototypes (excluding embeddings whose `source_candidate_id` belongs to the
   probe's episode) and computes `margin = sim - max_other_sim`; `fit-v2` evaluates margin-bearing

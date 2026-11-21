@@ -79,6 +79,7 @@ class CalibrationEvaluator:
         cls,
         artifact_path: str | Path | None,
         *,
+        expected_recognizer_version: str = "",
         expected_arcface_model_version: str = "",
         expected_model_profile: str = "",
         expected_preprocessing_version: str = "",
@@ -89,13 +90,15 @@ class CalibrationEvaluator:
     ) -> CalibrationEvaluator:
         """Load a calibration artifact from disk, returning a degraded evaluator on any failure.
 
-        ``expected_quality_version`` is the active face-quality scorer's version; a schema 2
-        artifact fitted on another scorer's scores is incompatible. ``expected_calibration_profile``
-        is the profile this evaluator serves (schema 1 artifacts are single-frame),
-        ``expected_aggregation`` is the live template aggregator's version (None for single-frame),
-        and ``expected_gallery_representation`` is the active gallery representation (``centroid``
-        or ``prototypes-v1``).
+        ``expected_recognizer_version`` (or its one-release alias ``expected_arcface_model_version``)
+        binds the artifact to the active recognizer profile. ``expected_quality_version`` is the
+        active face-quality scorer's version; a schema 2 artifact fitted on another scorer's scores
+        is incompatible. ``expected_calibration_profile`` is the profile this evaluator serves
+        (schema 1 artifacts are single-frame), ``expected_aggregation`` is the live template
+        aggregator's version (None for single-frame), and ``expected_gallery_representation`` is
+        the active gallery representation (``centroid`` or ``prototypes-v1``).
         """
+        expected_recognizer = expected_recognizer_version or expected_arcface_model_version
         if not artifact_path:
             logger.warning("calibration_artifact_missing reason=no_path_configured")
             return cls(None, "degraded_missing", "no artifact_path configured")
@@ -119,7 +122,7 @@ class CalibrationEvaluator:
 
         mismatch = _first_mismatch(
             artifact,
-            arcface_model_version=expected_arcface_model_version,
+            recognizer_version=expected_recognizer,
             model_profile=expected_model_profile,
             preprocessing_version=expected_preprocessing_version,
             quality_version=expected_quality_version,
@@ -199,8 +202,11 @@ class CalibrationEvaluator:
     def artifact_version(self) -> str | None:
         return self._artifact.artifact_version if self._artifact else None
 
+    def recognizer_version(self) -> str:
+        return self._artifact.recognizer_version if self._artifact else ""
+
     def arcface_model_version(self) -> str:
-        return self._artifact.arcface_model_version if self._artifact else ""
+        return self.recognizer_version()
 
     def model_profile(self) -> str:
         return self._artifact.model_profile if self._artifact else ""
@@ -256,7 +262,7 @@ class CalibrationEvaluator:
 def _first_mismatch(
     artifact: Artifact,
     *,
-    arcface_model_version: str,
+    recognizer_version: str,
     model_profile: str,
     preprocessing_version: str,
     quality_version: str,
@@ -264,8 +270,8 @@ def _first_mismatch(
     aggregation: str | None,
     gallery_representation: str,
 ) -> str | None:
-    if arcface_model_version and artifact.arcface_model_version != arcface_model_version:
-        return "arcface_model_version"
+    if recognizer_version and artifact.recognizer_version != recognizer_version:
+        return "recognizer_version"
     if model_profile and artifact.model_profile != model_profile:
         return "model_profile"
     if preprocessing_version and artifact.preprocessing_version != preprocessing_version:

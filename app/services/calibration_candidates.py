@@ -75,6 +75,13 @@ class CalibrationCandidate:
     audited_at: datetime | None = None
     revoked_at: datetime | None = None
     revoked_by: str | None = None
+    recognizer_version: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.recognizer_version and self.arcface_model_version:
+            object.__setattr__(self, "recognizer_version", self.arcface_model_version)
+        elif self.recognizer_version and not self.arcface_model_version:
+            object.__setattr__(self, "arcface_model_version", self.recognizer_version)
 
     @property
     def bucket(self) -> BucketKey:
@@ -148,6 +155,7 @@ class CalibrationCandidateRepository(Protocol):
         identity_id: str | None = None,
         association_id: str | None = None,
         include_revoked: bool = False,
+        recognizer_version: str | None = None,
     ) -> list[CalibrationCandidate]:
         """Attested candidates oldest first; excludes revoked rows unless *include_revoked*."""
         ...
@@ -177,7 +185,9 @@ class CalibrationCandidateRepository(Protocol):
         """Record an audit verdict on an unrevoked attested candidate; None when missing/revoked."""
         ...
 
-    async def list_labeled(self) -> list[CalibrationCandidate]:
+    async def list_labeled(
+        self, *, recognizer_version: str | None = None
+    ) -> list[CalibrationCandidate]:
         """Every labeled candidate, oldest first: the calibration dataset."""
         ...
 
@@ -205,15 +215,15 @@ def _sort_key(candidate: CalibrationCandidate) -> tuple[datetime, str]:
 
 
 _COLUMNS = """candidate_id, captured_at, camera_id, source, crop_object_key, embedding,
-    arcface_model_version, preprocessing_version, quality_version, quality_score,
-    quality_components, capture_profile, interocular_px, yaw_deg, pitch_deg, nearest_person_id,
-    nearest_similarity, label_state, label_identity_id, label_kind, label_source, labeled_by,
-    labeled_at, attestation_association_id, attestation_grade, audit_verdict, audited_by,
-    audited_at, revoked_at, revoked_by"""
+    arcface_model_version, recognizer_version, preprocessing_version, quality_version,
+    quality_score, quality_components, capture_profile, interocular_px, yaw_deg, pitch_deg,
+    nearest_person_id, nearest_similarity, label_state, label_identity_id, label_kind,
+    label_source, labeled_by, labeled_at, attestation_association_id, attestation_grade,
+    audit_verdict, audited_by, audited_at, revoked_at, revoked_by"""
 
 _SQL_INSERT = f"""INSERT INTO calibration_candidates ({_COLUMNS})
-VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15,
-        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)"""
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15,
+        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)"""
 
 _SQL_SELECT = f"SELECT {_COLUMNS} FROM calibration_candidates"
 
@@ -245,6 +255,7 @@ def _from_row(row: asyncpg.Record) -> CalibrationCandidate:
         crop_object_key=row["crop_object_key"],
         embedding=np.asarray(row["embedding"], dtype=np.float32),
         arcface_model_version=row["arcface_model_version"],
+        recognizer_version=row["recognizer_version"],
         preprocessing_version=row["preprocessing_version"],
         quality_version=row["quality_version"],
         quality_score=float(row["quality_score"]),
@@ -289,6 +300,7 @@ class PostgresCalibrationCandidateRepository:
                 c.crop_object_key,
                 c.embedding,
                 c.arcface_model_version,
+                c.recognizer_version or c.arcface_model_version,
                 c.preprocessing_version,
                 c.quality_version,
                 c.quality_score,
@@ -411,10 +423,16 @@ class PostgresCalibrationCandidateRepository:
             )
         return {(r["decile"], r["nearest"], r["camera_id"]): r["n"] for r in rows}
 
-    async def list_labeled(self) -> list[CalibrationCandidate]:
+    async def list_labeled(
+        self, *, recognizer_version: str | None = None
+    ) -> list[CalibrationCandidate]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                f"{_SQL_SELECT} WHERE label_state = 'labeled' ORDER BY captured_at, candidate_id"
+                f"""{_SQL_SELECT}
+                WHERE label_state = 'labeled'
+                  AND ($1::text IS NULL OR recognizer_version = $1)
+                ORDER BY captured_at, candidate_id""",
+                recognizer_version,
             )
         return [_from_row(r) for r in rows]
 
@@ -434,6 +452,7 @@ class PostgresCalibrationCandidateRepository:
         identity_id: str | None = None,
         association_id: str | None = None,
         include_revoked: bool = False,
+        recognizer_version: str | None = None,
     ) -> list[CalibrationCandidate]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -443,11 +462,13 @@ class PostgresCalibrationCandidateRepository:
                   AND ($2::text IS NULL OR label_identity_id = $2)
                   AND ($3::text IS NULL OR attestation_association_id = $3)
                   AND ($4::boolean OR revoked_at IS NULL)
+                  AND ($5::text IS NULL OR recognizer_version = $5)
                 ORDER BY captured_at, candidate_id""",
                 audited,
                 identity_id,
                 association_id,
                 include_revoked,
+                recognizer_version,
             )
         return [_from_row(r) for r in rows]
 
@@ -620,8 +641,18 @@ class InMemoryCalibrationCandidateRepository:
                 counts[c.bucket] = counts.get(c.bucket, 0) + 1
         return counts
 
-    async def list_labeled(self) -> list[CalibrationCandidate]:
-        return sorted((c for c in self._rows.values() if c.label_state == "labeled"), key=_sort_key)
+    async def list_labeled(
+        self, *, recognizer_version: str | None = None
+    ) -> list[CalibrationCandidate]:
+        return sorted(
+            (
+                c
+                for c in self._rows.values()
+                if c.label_state == "labeled"
+                and (recognizer_version is None or c.recognizer_version == recognizer_version)
+            ),
+            key=_sort_key,
+        )
 
     async def count_by_state(self) -> dict[LabelState, int]:
         counts = _zero_counts()
@@ -636,6 +667,7 @@ class InMemoryCalibrationCandidateRepository:
         identity_id: str | None = None,
         association_id: str | None = None,
         include_revoked: bool = False,
+        recognizer_version: str | None = None,
     ) -> list[CalibrationCandidate]:
         return sorted(
             (
@@ -646,6 +678,7 @@ class InMemoryCalibrationCandidateRepository:
                 and (identity_id is None or c.label_identity_id == identity_id)
                 and (association_id is None or c.attestation_association_id == association_id)
                 and (include_revoked or c.revoked_at is None)
+                and (recognizer_version is None or c.recognizer_version == recognizer_version)
             ),
             key=_sort_key,
         )

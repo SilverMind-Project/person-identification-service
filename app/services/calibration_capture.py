@@ -102,14 +102,25 @@ class AttestationOutcome:
 
 @dataclass(frozen=True)
 class CaptureVersions:
-    arcface_model_version: str
-    preprocessing_version: str
+    arcface_model_version: str = ""
+    preprocessing_version: str = ""
+    recognizer_version: str = ""
+
+    def __post_init__(self) -> None:
+        if self.recognizer_version and not self.arcface_model_version:
+            object.__setattr__(self, "arcface_model_version", self.recognizer_version)
+        elif self.arcface_model_version and not self.recognizer_version:
+            object.__setattr__(self, "recognizer_version", self.arcface_model_version)
 
 
 class CropStore(Protocol):
     async def put_png(self, key: str, data: bytes) -> None: ...
 
     async def delete(self, keys: Sequence[str]) -> None: ...
+
+    async def get_bytes(self, key: str) -> bytes | None: ...
+
+    async def delete_prefix(self, prefix: str) -> list[str]: ...
 
 
 class DailyBucketCounter:
@@ -440,6 +451,7 @@ class CalibrationCaptureService:
             crop_object_key="",
             embedding=np.asarray(face.embedding, dtype=np.float32),
             arcface_model_version=self._versions.arcface_model_version,
+            recognizer_version=self._versions.recognizer_version,
             preprocessing_version=self._versions.preprocessing_version,
             quality_version=quality.version,
             quality_score=quality.score,
@@ -499,3 +511,9 @@ class MinioCropStore:
     async def delete(self, keys: Sequence[str]) -> None:
         for key in keys:
             await asyncio.to_thread(self._client.delete_object, key)
+
+    async def get_bytes(self, key: str) -> bytes | None:
+        return await asyncio.to_thread(self._client.download_bytes, key)
+
+    async def delete_prefix(self, prefix: str) -> list[str]:
+        return await asyncio.to_thread(self._client.delete_prefix, prefix)

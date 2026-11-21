@@ -26,6 +26,9 @@ class DetectedFace:
     age: int | None = None
     # Set by FaceEngine from the aligned crop; None for a face that was not scored.
     quality: FaceQuality | None = None
+    # Aligned BGR crop (input_size_px x input_size_px) produced during recognition; kept in memory
+    # only so enrollment can persist it without re-running alignment (excluded from repr/equality).
+    aligned_crop_bgr: np.ndarray | None = field(default=None, repr=False, compare=False)
     # Derived from bbox and keypoints_5_px when the face is built, so every producer (the engine
     # and test fakes alike) carries the one measurement face_geometry() defines.
     geometry: FaceGeometry = field(init=False)

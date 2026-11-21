@@ -43,6 +43,7 @@ from app.services.match_policy import MatchThresholds
 from app.services.minio_client import create_minio_client
 from app.services.motion_detector import MotionDetector
 from app.services.prototype_builder import PrototypePolicy
+from app.services.recognizer_profile import load_active_recognizer_profile
 from app.services.template_aggregation import QualityWeightedMeanAggregator
 from app.services.template_match import TemplateMatchService
 from app.services.visitor_store import VisitorStore
@@ -140,9 +141,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting Person Identification Service")
 
     # Configuration errors fail before any connection is opened.
+    recognizer_profile = load_active_recognizer_profile(config.get("face_engine", {}) or {})
     quality_scorer = build_face_quality_scorer(config.get("face_quality", {}))
+    active_quality_version = recognizer_profile.scoped_quality_version(quality_scorer.version)
     gallery_mode = _gallery_representation_mode()
-    prototype_policy = _prototype_policy(quality_scorer.version)
+    prototype_policy = _prototype_policy(active_quality_version)
     capture_policy = _capture_policy()
 
     # Database pool
@@ -171,20 +174,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         triton_timeout_ms = int(config.get("face_engine.triton_timeout_ms", 30_000))
         triton_client = TritonGrpcClient(triton_url, timeout_ms=triton_timeout_ms)
         await triton_client.__aenter__()
-        face_engine = FaceEngine(triton_client, quality_scorer)
+        face_engine = FaceEngine(triton_client, quality_scorer, recognizer_profile)
         await face_engine.validate_models()
         app.state.face_engine = face_engine
         app.state.triton_client = triton_client
+
+        crop_store = MinioCropStore(minio_client)
+        expected_recognizer_version = str(
+            config.get("calibration.recognizer_version")
+            or config.get("calibration.arcface_model_version")
+            or recognizer_profile.recognizer_version
+        )
+        expected_preprocessing_version = str(
+            config.get("calibration.preprocessing_version")
+            or recognizer_profile.preprocessing_version
+        )
 
         calibration_candidates = PostgresCalibrationCandidateRepository(pool)
         app.state.calibration_candidates = calibration_candidates
         calibration_capture = CalibrationCaptureService(
             calibration_candidates,
-            MinioCropStore(minio_client),
+            crop_store,
             capture_policy,
             CaptureVersions(
-                arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
-                preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
+                recognizer_version=recognizer_profile.recognizer_version,
+                preprocessing_version=recognizer_profile.preprocessing_version,
             ),
             _attestation_policy(),
         )
@@ -192,7 +206,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.calibration_capture = calibration_capture
         logger.info("Calibration capture enabled=%s", calibration_capture.enabled)
 
-        enrollment_repository = PostgresEnrollmentRepository(pool)
+        enrollment_repository = PostgresEnrollmentRepository(
+            pool, recognizer_version=recognizer_profile.recognizer_version
+        )
         recognition_thresholds = MatchThresholds(
             recognized_min_similarity=float(config.get("recognition.threshold", 0.4)),
             candidate_min_similarity=float(config.get("recognition.unknown_threshold", 0.25)),
@@ -205,6 +221,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             gallery_representation=gallery_mode,
             prototype_policy=prototype_policy,
             on_member_removed=calibration_capture.delete_for_person,
+            crop_store=crop_store,
+            alignment_template=recognizer_profile.alignment_template_array(),
+            input_size_px=recognizer_profile.input_size_px,
         )
         app.state.enrollment_store = enrollment_store
         template_aggregator = QualityWeightedMeanAggregator()
@@ -220,7 +239,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ),
             gallery_representation=gallery_mode,
         )
-        app.state.face_quality_version = quality_scorer.version
+        app.state.face_quality_version = face_engine.quality_version
 
         app.state.motion_detector = MotionDetector()
 
@@ -232,6 +251,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             thresholds=recognition_thresholds,
             enrollment_store=enrollment_store,
             prototype_policy=prototype_policy,
+            recognizer_version=recognizer_profile.recognizer_version,
         )
         app.state.visitor_store = visitor_store
 
@@ -240,19 +260,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         expected_rep = enrollment_store.active_representation
         calibration_evaluator = CalibrationEvaluator.from_artifact_path(
             config.get("calibration.artifact_path", "") or None,
-            expected_arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
+            expected_recognizer_version=expected_recognizer_version,
             expected_model_profile=str(face_engine.model_profile),
-            expected_preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
-            expected_quality_version=quality_scorer.version,
+            expected_preprocessing_version=expected_preprocessing_version,
+            expected_quality_version=face_engine.quality_version,
             expected_gallery_representation=expected_rep,
         )
         app.state.calibration_evaluator = calibration_evaluator
         template_calibration_evaluator = CalibrationEvaluator.from_artifact_path(
             config.get("calibration.template_artifact_path", "") or None,
-            expected_arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
+            expected_recognizer_version=expected_recognizer_version,
             expected_model_profile=str(face_engine.model_profile),
-            expected_preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
-            expected_quality_version=quality_scorer.version,
+            expected_preprocessing_version=expected_preprocessing_version,
+            expected_quality_version=face_engine.quality_version,
             expected_calibration_profile=TEMPLATE_PROFILE,
             expected_aggregation=template_aggregator.version,
             expected_gallery_representation=expected_rep,

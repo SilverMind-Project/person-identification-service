@@ -35,6 +35,7 @@ from app import config
 from app.calibration.quality_breakpoints import FaceQualitySample, InputReport, analyze
 from app.services.face_engine import FaceEngine, align_face
 from app.services.face_quality import build_face_quality_scorer, laplacian_variance
+from app.services.recognizer_profile import load_active_recognizer_profile
 
 _SCHEMA_VERSION = 1
 
@@ -50,15 +51,19 @@ def _load_manifest(path: Path) -> list[tuple[Path, str]]:
     return entries
 
 
-async def _centroids(dsn: str, identity_ids: set[str]) -> dict[str, np.ndarray]:
+async def _centroids(
+    dsn: str, identity_ids: set[str], recognizer_version: str
+) -> dict[str, np.ndarray]:
     conn = await asyncpg.connect(dsn)
     try:
         await register_vector(conn)
         # Read-only: this tool never writes enrollment or any other table.
         async with conn.transaction(readonly=True):
             rows = await conn.fetch(
-                "SELECT person_id, centroid FROM centroids WHERE person_id = ANY($1::text[])",
+                """SELECT person_id, centroid FROM centroids
+                   WHERE person_id = ANY($1::text[]) AND recognizer_version = $2""",
                 sorted(identity_ids),
+                recognizer_version,
             )
     finally:
         await conn.close()
@@ -69,7 +74,10 @@ async def _samples(entries: list[tuple[Path, str]]) -> tuple[list[FaceQualitySam
     dsn = config.get("database.dsn")
     if not dsn:
         raise RuntimeError("database.dsn is not configured (set DATABASE_URL)")
-    centroids = await _centroids(dsn, {identity for _, identity in entries})
+    profile = load_active_recognizer_profile(config.get("face_engine", {}) or {})
+    centroids = await _centroids(
+        dsn, {identity for _, identity in entries}, profile.recognizer_version
+    )
     unknown = sorted({identity for _, identity in entries} - set(centroids))
     if unknown:
         raise ValueError(f"identities not enrolled: {unknown}")
@@ -82,7 +90,7 @@ async def _samples(entries: list[tuple[Path, str]]) -> tuple[list[FaceQualitySam
     samples: list[FaceQualitySample] = []
     skipped = 0
     async with client:
-        engine = FaceEngine(client, scorer)
+        engine = FaceEngine(client, scorer, profile)
         await engine.validate_models()
         for image_path, identity in entries:
             image = cv2.imread(str(image_path))
@@ -95,10 +103,13 @@ async def _samples(entries: list[tuple[Path, str]]) -> tuple[list[FaceQualitySam
                 continue
             face = max(faces, key=lambda f: f.geometry.face_width_px * f.geometry.face_height_px)
             assert face.keypoints_5_px is not None  # set by FaceEngine for every face
-            gray = np.asarray(
-                cv2.cvtColor(align_face(image, face.keypoints_5_px), cv2.COLOR_BGR2GRAY),
-                dtype=np.uint8,
+            aligned = align_face(
+                image,
+                face.keypoints_5_px,
+                template=profile.alignment_template_array(),
+                output_size_px=profile.input_size_px,
             )
+            gray = np.asarray(cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
             samples.append(
                 FaceQualitySample(
                     interocular_px=face.geometry.interocular_px,

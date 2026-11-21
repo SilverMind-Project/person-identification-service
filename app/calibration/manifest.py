@@ -106,6 +106,7 @@ class ManifestMeta:
     skipped_not_a_face: int = 0
     skipped_identity_not_enrolled: int = 0
     quality_version: str = ""
+    recognizer_version: str = ""
     arcface_model_version: str = ""
     preprocessing_version: str = ""
     capture_profile: dict[str, float] = field(default_factory=dict)
@@ -242,9 +243,10 @@ def _household_probes(
         return None
 
     meta.quality_version = _single((c.quality_version for c in usable), "quality_version")
-    meta.arcface_model_version = _single(
-        (c.arcface_model_version for c in usable), "arcface_model_version"
+    meta.recognizer_version = _single(
+        (c.recognizer_version or c.arcface_model_version for c in usable), "recognizer_version"
     )
+    meta.arcface_model_version = meta.recognizer_version
     meta.preprocessing_version = _single(
         (c.preprocessing_version for c in usable), "preprocessing_version"
     )

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SplitCounts(BaseModel):
@@ -46,7 +46,8 @@ class CalibrationManifest(BaseModel):
     schema_version: int = 1
     artifact_version: str
     method: Literal["logistic", "isotonic"]
-    arcface_model_version: str
+    recognizer_version: str = ""
+    arcface_model_version: str = ""
     model_profile: str
     preprocessing_version: str
     fitted_at: datetime
@@ -57,6 +58,21 @@ class CalibrationManifest(BaseModel):
     test_dataset_hash: str = ""
     split_counts: SplitCounts = Field(default_factory=SplitCounts)
     metrics: CalibrationMetrics = Field(default_factory=CalibrationMetrics)
+
+    @model_validator(mode="after")
+    def _sync_recognizer_version(self) -> CalibrationManifest:
+        if self.recognizer_version and not self.arcface_model_version:
+            self.arcface_model_version = self.recognizer_version
+        elif self.arcface_model_version and not self.recognizer_version:
+            self.recognizer_version = self.arcface_model_version
+        if not self.recognizer_version:
+            raise ValueError("recognizer_version (or arcface_model_version) is required")
+        if self.recognizer_version != self.arcface_model_version:
+            raise ValueError(
+                "recognizer_version and arcface_model_version disagree: "
+                f"{self.recognizer_version!r} != {self.arcface_model_version!r}"
+            )
+        return self
 
 
 class CalibrationArtifact(CalibrationManifest):

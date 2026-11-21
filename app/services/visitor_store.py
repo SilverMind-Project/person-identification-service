@@ -36,6 +36,7 @@ from app.services.face_models import DetectedFace, IdentifyResult
 from app.services.match_policy import MatchThresholds
 from app.services.minio_client import MinioClient
 from app.services.prototype_builder import MemberEmbedding, PrototypePolicy
+from app.services.recognizer_profile import DEFAULT_RECOGNIZER_VERSION
 from app.services.visitor_policy import (
     CLOSED_STATUSES,
     JOINABLE_STATUSES,
@@ -73,11 +74,13 @@ class VisitorStore:
         thresholds: MatchThresholds | None = None,
         enrollment_store: EnrollmentStore | None = None,
         prototype_policy: PrototypePolicy = PrototypePolicy(),
+        recognizer_version: str = DEFAULT_RECOGNIZER_VERSION,
     ) -> None:
         self._pool = pool
         self._minio = minio_client
         self._enrollment_store = enrollment_store
         self._prototype_policy = prototype_policy
+        self._recognizer_version = recognizer_version
 
         self._clustering_enabled = bool(config.get("visitors.clustering_enabled", True))
         self._min_detection_score = float(config.get("visitors.min_detection_score", 0.6))
@@ -207,22 +210,25 @@ class VisitorStore:
             await conn.execute(
                 """INSERT INTO visitor_clusters
                        (cluster_id, status, centroid, sighting_count, distinct_days,
-                        first_seen_at, last_seen_at)
-                   VALUES ($1, 'candidate', $2, 0, 0, $3, $3)""",
+                        first_seen_at, last_seen_at, recognizer_version)
+                   VALUES ($1, 'candidate', $2, 0, 0, $3, $3, $4)""",
                 cluster_id,
                 embedding,
                 seen_at,
+                self._recognizer_version,
             )
 
         sighting_row = await conn.fetchrow(
-            """INSERT INTO visitor_sightings (cluster_id, embedding, quality, seen_at, source)
-               VALUES ($1, $2, $3, $4, $5)
+            """INSERT INTO visitor_sightings
+                   (cluster_id, embedding, quality, seen_at, source, recognizer_version)
+               VALUES ($1, $2, $3, $4, $5, $6)
                RETURNING id""",
             cluster_id,
             embedding,
             quality,
             seen_at,
             source,
+            self._recognizer_version,
         )
         sighting_id = int(sighting_row["id"])
 
@@ -270,8 +276,9 @@ class VisitorStore:
         rows = await conn.fetch(
             """SELECT cluster_id, centroid, sighting_count, status, first_seen_at, last_seen_at
                FROM visitor_clusters
-               WHERE status = ANY($1::text[])""",
+               WHERE status = ANY($1::text[]) AND recognizer_version = $2""",
             list(JOINABLE_STATUSES),
+            self._recognizer_version,
         )
         return [
             _JoinableCluster(
@@ -322,12 +329,19 @@ class VisitorStore:
         async with self._pool.acquire() as conn:
             if status is not None:
                 rows = await conn.fetch(
-                    """SELECT * FROM visitor_clusters WHERE status = $1
+                    """SELECT * FROM visitor_clusters
+                       WHERE status = $1 AND recognizer_version = $2
                        ORDER BY last_seen_at DESC""",
                     status,
+                    self._recognizer_version,
                 )
             else:
-                rows = await conn.fetch("SELECT * FROM visitor_clusters ORDER BY last_seen_at DESC")
+                rows = await conn.fetch(
+                    """SELECT * FROM visitor_clusters
+                       WHERE recognizer_version = $1
+                       ORDER BY last_seen_at DESC""",
+                    self._recognizer_version,
+                )
 
             summaries = []
             for row in rows:
@@ -445,9 +459,18 @@ class VisitorStore:
             await conn.execute(
                 "INSERT INTO members (person_id, name) VALUES ($1, $2)", person_id, name
             )
-            await insert_embeddings(conn, person_id, embeddings)
-            await recompute_member_centroid(conn, person_id)
-            await rebuild_member_prototypes(conn, person_id, self._prototype_policy)
+            await insert_embeddings(
+                conn, person_id, embeddings, recognizer_version=self._recognizer_version
+            )
+            await recompute_member_centroid(
+                conn, person_id, recognizer_version=self._recognizer_version
+            )
+            await rebuild_member_prototypes(
+                conn,
+                person_id,
+                self._prototype_policy,
+                recognizer_version=self._recognizer_version,
+            )
 
             await conn.execute(
                 """UPDATE visitor_clusters

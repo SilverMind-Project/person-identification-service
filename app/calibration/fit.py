@@ -932,7 +932,8 @@ def run_fit_v2(
     artifact = CalibrationArtifactV2(
         artifact_version=str(uuid.uuid4()),
         method="logistic_v2",
-        arcface_model_version=str(meta["arcface_model_version"]),
+        recognizer_version=str(meta.get("recognizer_version") or meta["arcface_model_version"]),
+        arcface_model_version=str(meta.get("recognizer_version") or meta["arcface_model_version"]),
         model_profile=model_profile,
         preprocessing_version=str(meta["preprocessing_version"]),
         fitted_at=datetime.now(UTC),

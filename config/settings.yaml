@@ -18,22 +18,66 @@ server:
 
 # Face detection & recognition
 face_engine:
-  # Buffalo_L is served by Triton. Point this at the CTS Triton service by
+  # All face models are served by Triton. Point this at the CTS Triton service by
   # default, or set TRITON_GRPC_URL to the Jetson endpoint.
-  model_name: "buffalo_l"
   triton_url: "${TRITON_GRPC_URL:triton:8701}"
   triton_timeout_ms: "${TRITON_TIMEOUT_MS:30000}"
-  # Informational label exposed by /health. Use "full" for the DGX repository
+  # Informational precision label exposed by /health. Use "full" for the DGX repository
   # and "int8" for triton-models-jetson.
   model_profile: "${PERSON_ID_MODEL_PROFILE:full}"
   det_size: [640, 640]
   det_threshold: "${DETECTION_THRESHOLD:0.6}"
-  models:
-    detector: "face-detector-scrfd"
-    recognition: "face-recognition-arcface"
-    landmark_2d: "face-landmark-2d106"
-    landmark_3d: "face-landmark-3d68"
-    genderage: "face-attribute-genderage"
+  # Active recognizer profile name under face_engine.profiles; unknown names fail startup.
+  active_profile: "${FACE_RECOGNIZER_PROFILE:buffalo_l}"
+  profiles:
+    # Default InsightFace Buffalo_L pack (512-dim ArcFace w600k_r50).
+    # InsightFace model zoo weights are licensed for non-commercial research purposes only.
+    buffalo_l:
+      recognizer_version: "buffalo_l"
+      detector_model: "face-detector-scrfd"
+      recognition_model: "face-recognition-arcface"
+      landmark_2d_model: "face-landmark-2d106"
+      landmark_3d_model: "face-landmark-3d68"
+      genderage_model: "face-attribute-genderage"
+      input_size_px: 112
+      alignment_template:
+        - [38.2946, 51.6963]
+        - [73.5318, 51.5014]
+        - [56.0252, 71.7366]
+        - [41.5493, 92.3655]
+        - [70.7299, 92.2041]
+      embedding_dim: 512
+      normalization_mean: 127.5
+      normalization_std: 127.5
+      color_space: "rgb"
+      recognition_input_name: "input.1"
+      recognition_output_name: "683"
+      preprocessing_version: "v1"
+      licence: "InsightFace model zoo: non-commercial research purposes only (code MIT; weights and training data non-commercial research only)"
+    # AdaFace IR-50 candidate profile for low-resolution household evaluation (512-dim, BGR input).
+    # Keeps the 68-point 3D landmark head-pose model separate from the recognition head.
+    adaface_ir50_webface4m:
+      recognizer_version: "adaface_ir50_webface4m"
+      detector_model: "face-detector-scrfd"
+      recognition_model: "face-recognition-adaface-ir50"
+      landmark_2d_model: "face-landmark-2d106"
+      landmark_3d_model: "face-landmark-3d68"
+      genderage_model: "face-attribute-genderage"
+      input_size_px: 112
+      alignment_template:
+        - [38.2946, 51.6963]
+        - [73.5318, 51.5014]
+        - [56.0252, 71.7366]
+        - [41.5493, 92.3655]
+        - [70.7299, 92.2041]
+      embedding_dim: 512
+      normalization_mean: 127.5
+      normalization_std: 127.5
+      color_space: "bgr"
+      recognition_input_name: "input"
+      recognition_output_name: "embedding"
+      preprocessing_version: "v1"
+      licence: "AdaFace code MIT; pretrained weights trained on WebFace4M (non-commercial academic research only; training-data licence inherits into weights)"
 
 # Recognition / identification
 recognition:
@@ -105,19 +149,19 @@ annotation:
   text_thickness: 2
   box_thickness: 2
 
-# ArcFace confidence calibration
+# Face confidence calibration
 # artifact_path: path to a JSON calibration artifact produced by the
 #   calibration-tools CLI (uv run --extra calibration-tools python -m app.calibration.cli fit ...).
 #   Absent or invalid artifact causes the service to start in degraded_missing state;
 #   calibrated_confidence is null in all responses until a valid artifact is provided.
-# arcface_model_version / preprocessing_version: must match the values embedded
-#   in the artifact; mismatch causes degraded_incompatible and calibrated_confidence=null.
+# recognizer_version / preprocessing_version: optional overrides; when empty, the active
+#   face_engine profile supplies them so calibration never drifts from the running recognizer.
 calibration:
   artifact_path: "${CALIBRATION_ARTIFACT_PATH:}"
   # Schema 2 artifact fitted with the template profile (build-manifest --profile template); it
   # calibrates /match-template scores only. Empty means templates carry no calibrated confidence.
   template_artifact_path: "${CALIBRATION_TEMPLATE_ARTIFACT_PATH:}"
-  arcface_model_version: "${CALIBRATION_ARCFACE_MODEL_VERSION:buffalo_l}"
+  recognizer_version: "${CALIBRATION_RECOGNIZER_VERSION:}"
   preprocessing_version: "${CALIBRATION_PREPROCESSING_VERSION:v1}"
 
 # Face image quality, reported on every identified face as quality {score, components, version}.

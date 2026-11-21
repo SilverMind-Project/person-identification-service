@@ -37,6 +37,7 @@ def test_health_has_a_template_calibration_block() -> None:
     assert body["template_calibration"] == {
         "status": "degraded_incompatible",
         "artifact_version": None,
+        "recognizer_version": "",
         "profile": "",
         "aggregation": None,
         "quality_version": "",

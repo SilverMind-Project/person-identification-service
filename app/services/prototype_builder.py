@@ -19,6 +19,8 @@ from typing import Literal
 
 import numpy as np
 
+from app.services.recognizer_profile import DEFAULT_RECOGNIZER_VERSION
+
 PoseBin = Literal["frontal", "left", "right", "down"]
 POSE_BINS: tuple[PoseBin, ...] = ("frontal", "left", "right", "down")
 
@@ -60,6 +62,7 @@ class MemberEmbedding:
     approved_by: str | None = None
     approved_at: datetime | None = None
     crop_object_key: str | None = None
+    recognizer_version: str = DEFAULT_RECOGNIZER_VERSION
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,7 @@ class Prototype:
     approved_by: str | None = None
     approved_at: datetime | None = None
     created_at: datetime | None = None
+    recognizer_version: str = DEFAULT_RECOGNIZER_VERSION
 
 
 def pose_bin(yaw_deg: float, pitch_deg: float) -> PoseBin:
@@ -123,6 +127,8 @@ def build_prototypes(
     person_id: str,
     embeddings: Sequence[MemberEmbedding],
     policy: PrototypePolicy = PrototypePolicy(),
+    *,
+    recognizer_version: str = DEFAULT_RECOGNIZER_VERSION,
 ) -> list[Prototype]:
     """Build deterministic pose-binned prototypes for one enrolled member.
 
@@ -130,6 +136,9 @@ def build_prototypes(
     normalized mean prototype. Smaller bins keep each embedding as its own prototype, capped at
     ``policy.max_per_bin`` (keeping the highest-quality samples first).
     """
+    version_prefix = (
+        "" if recognizer_version == DEFAULT_RECOGNIZER_VERSION else f"{recognizer_version}:"
+    )
     grouped: dict[PoseBin, list[tuple[int, MemberEmbedding]]] = {b: [] for b in POSE_BINS}
     for idx, item in enumerate(embeddings):
         target_bin: PoseBin = item.pose_bin if item.pose_bin is not None else "frontal"
@@ -189,7 +198,7 @@ def build_prototypes(
             )
             prototypes.append(
                 Prototype(
-                    prototype_id=_prototype_uuid(f"{person_id}:{bin_name}:pooled"),
+                    prototype_id=_prototype_uuid(f"{version_prefix}{person_id}:{bin_name}:pooled"),
                     person_id=person_id,
                     pose_bin=bin_name,
                     embedding=proto_vec,
@@ -201,6 +210,7 @@ def build_prototypes(
                     source_embedding_id=None,
                     approved_by=approved_entry.approved_by,
                     approved_at=approved_entry.approved_at,
+                    recognizer_version=recognizer_version,
                 )
             )
             continue
@@ -216,7 +226,9 @@ def build_prototypes(
             )
             prototypes.append(
                 Prototype(
-                    prototype_id=_prototype_uuid(f"{person_id}:{bin_name}:sample:{sample_key}"),
+                    prototype_id=_prototype_uuid(
+                        f"{version_prefix}{person_id}:{bin_name}:sample:{sample_key}"
+                    ),
                     person_id=person_id,
                     pose_bin=bin_name,
                     embedding=_unit(item.embedding),
@@ -228,6 +240,7 @@ def build_prototypes(
                     source_embedding_id=item.embedding_id,
                     approved_by=item.approved_by,
                     approved_at=item.approved_at,
+                    recognizer_version=recognizer_version,
                 )
             )
 

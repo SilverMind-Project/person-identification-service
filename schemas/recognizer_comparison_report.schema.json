@@ -1,0 +1,337 @@
+{
+  "$defs": {
+    "AdoptionDecision": {
+      "description": "Deterministic adopt / keep_baseline / insufficient_data outcome with reasons.",
+      "properties": {
+        "decision": {
+          "enum": [
+            "adopt",
+            "keep_baseline",
+            "insufficient_data"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "gain_16_to_32px_pp": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gain 16 To 32Px Pp"
+        },
+        "min_required_gain_pp": {
+          "default": 10.0,
+          "title": "Min Required Gain Pp",
+          "type": "number"
+        },
+        "open_set_fmr_ok": {
+          "default": false,
+          "title": "Open Set Fmr Ok",
+          "type": "boolean"
+        },
+        "ece_ok": {
+          "default": false,
+          "title": "Ece Ok",
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "AdoptionDecision",
+      "type": "object"
+    },
+    "BandEvalMetrics": {
+      "description": "Per-interocular-band genuine acceptance and calibration error on covered residents.",
+      "properties": {
+        "band": {
+          "title": "Band",
+          "type": "string"
+        },
+        "genuine_count": {
+          "minimum": 0,
+          "title": "Genuine Count",
+          "type": "integer"
+        },
+        "genuine_accepted": {
+          "minimum": 0,
+          "title": "Genuine Accepted",
+          "type": "integer"
+        },
+        "genuine_acceptance_rate": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Genuine Acceptance Rate"
+        },
+        "mean_genuine_similarity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mean Genuine Similarity"
+        },
+        "ece": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ece"
+        }
+      },
+      "required": [
+        "band",
+        "genuine_count",
+        "genuine_accepted"
+      ],
+      "title": "BandEvalMetrics",
+      "type": "object"
+    },
+    "ProfileEvalSummary": {
+      "description": "Household holdout evaluation metrics for a single recognizer profile.",
+      "properties": {
+        "profile_name": {
+          "title": "Profile Name",
+          "type": "string"
+        },
+        "recognizer_version": {
+          "title": "Recognizer Version",
+          "type": "string"
+        },
+        "covered_identities": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Covered Identities",
+          "type": "array"
+        },
+        "genuine_count": {
+          "minimum": 0,
+          "title": "Genuine Count",
+          "type": "integer"
+        },
+        "open_set_impostor_count": {
+          "minimum": 0,
+          "title": "Open Set Impostor Count",
+          "type": "integer"
+        },
+        "operating_threshold_at_1pct_fmr": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operating Threshold At 1Pct Fmr"
+        },
+        "achieved_open_set_fmr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Achieved Open Set Fmr"
+        },
+        "overall_gar_at_1pct_fmr": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overall Gar At 1Pct Fmr"
+        },
+        "overall_ece": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Overall Ece"
+        },
+        "by_interocular_band": {
+          "additionalProperties": {
+            "$ref": "#/$defs/BandEvalMetrics"
+          },
+          "title": "By Interocular Band",
+          "type": "object"
+        },
+        "dataset_hash": {
+          "title": "Dataset Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_name",
+        "recognizer_version",
+        "covered_identities",
+        "genuine_count",
+        "open_set_impostor_count",
+        "by_interocular_band",
+        "dataset_hash"
+      ],
+      "title": "ProfileEvalSummary",
+      "type": "object"
+    },
+    "RecognizerLicenceRecord": {
+      "description": "Recorded licence terms across code, weights, and training dataset for one candidate.",
+      "properties": {
+        "profile_name": {
+          "title": "Profile Name",
+          "type": "string"
+        },
+        "recognizer_version": {
+          "title": "Recognizer Version",
+          "type": "string"
+        },
+        "embedding_dim": {
+          "minimum": 1,
+          "title": "Embedding Dim",
+          "type": "integer"
+        },
+        "code_licence": {
+          "minLength": 1,
+          "title": "Code Licence",
+          "type": "string"
+        },
+        "weights_licence": {
+          "minLength": 1,
+          "title": "Weights Licence",
+          "type": "string"
+        },
+        "training_data_licence": {
+          "minLength": 1,
+          "title": "Training Data Licence",
+          "type": "string"
+        },
+        "commercial_clean": {
+          "title": "Commercial Clean",
+          "type": "boolean"
+        },
+        "notes": {
+          "default": "",
+          "title": "Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_name",
+        "recognizer_version",
+        "embedding_dim",
+        "code_licence",
+        "weights_licence",
+        "training_data_licence",
+        "commercial_clean"
+      ],
+      "title": "RecognizerLicenceRecord",
+      "type": "object"
+    }
+  },
+  "description": "Schema-validated comparison report produced by Part B evaluation.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "random_seed": {
+      "default": 42,
+      "title": "Random Seed",
+      "type": "integer"
+    },
+    "max_open_set_fmr": {
+      "default": 0.01,
+      "title": "Max Open Set Fmr",
+      "type": "number"
+    },
+    "min_required_gain_16_to_32px_pp": {
+      "default": 10.0,
+      "title": "Min Required Gain 16 To 32Px Pp",
+      "type": "number"
+    },
+    "max_ece": {
+      "default": 0.05,
+      "title": "Max Ece",
+      "type": "number"
+    },
+    "baseline": {
+      "$ref": "#/$defs/ProfileEvalSummary"
+    },
+    "candidate": {
+      "$ref": "#/$defs/ProfileEvalSummary"
+    },
+    "baseline_licence": {
+      "$ref": "#/$defs/RecognizerLicenceRecord"
+    },
+    "candidate_licence": {
+      "$ref": "#/$defs/RecognizerLicenceRecord"
+    },
+    "decision": {
+      "$ref": "#/$defs/AdoptionDecision"
+    }
+  },
+  "required": [
+    "baseline",
+    "candidate",
+    "baseline_licence",
+    "candidate_licence",
+    "decision"
+  ],
+  "title": "RecognizerComparisonReport",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognizer_comparison_report.schema.json"
+}

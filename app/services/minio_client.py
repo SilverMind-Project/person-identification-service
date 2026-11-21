@@ -83,6 +83,42 @@ class MinioClient:
         self._client.delete_object(Bucket=self.bucket, Key=object_name)
         logger.info("MinIO object deleted: %s", object_name)
 
+    def download_bytes(self, object_name: str) -> bytes | None:
+        """Download raw object bytes; returns None when the object does not exist."""
+        try:
+            response = self._client.get_object(Bucket=self.bucket, Key=object_name)
+            return bytes(response["Body"].read())
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                return None
+            raise
+
+    def list_objects(self, prefix: str) -> list[str]:
+        """List all object keys under *prefix* in sorted order."""
+        keys: list[str] = []
+        token: str | None = None
+        while True:
+            kwargs: dict[str, object] = {"Bucket": self.bucket, "Prefix": prefix}
+            if token is not None:
+                kwargs["ContinuationToken"] = token
+            page = self._client.list_objects_v2(**kwargs)
+            for item in page.get("Contents", []):
+                key = item.get("Key")
+                if key:
+                    keys.append(str(key))
+            if not page.get("IsTruncated"):
+                break
+            token = page.get("NextContinuationToken")
+        return sorted(keys)
+
+    def delete_prefix(self, prefix: str) -> list[str]:
+        """Delete every object whose key starts with *prefix*; return deleted keys."""
+        keys = self.list_objects(prefix)
+        for key in keys:
+            self.delete_object(key)
+        return keys
+
 
 def create_minio_client() -> MinioClient:
     """Create a MinioClient from application settings."""

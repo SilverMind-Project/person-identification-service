@@ -14,6 +14,7 @@ from app.models.templates import (
 )
 from app.observability.metrics import template_matches_total
 from app.services.face_quality import FaceQuality
+from app.services.recognizer_profile import load_active_recognizer_profile
 from app.services.template_aggregation import decode_embedding_f16
 from app.services.template_match import TemplateMember
 
@@ -37,12 +38,18 @@ async def match_template(request: Request, body: MatchTemplateRequest) -> MatchT
     matcher = request.app.state.template_matcher
     evaluator = request.app.state.template_calibration_evaluator
     quality_version: str = request.app.state.face_quality_version
-    active_arcface_version = str(config.get("calibration.arcface_model_version", ""))
+    engine = getattr(request.app.state, "face_engine", None)
+    active_recognizer_version = str(
+        getattr(engine, "recognizer_version", "")
+        or config.get("calibration.recognizer_version")
+        or config.get("calibration.arcface_model_version")
+        or load_active_recognizer_profile(config.get("face_engine", {}) or {}).recognizer_version
+    )
 
-    if body.embedding_model_version != active_arcface_version:
+    if body.embedding_model_version != active_recognizer_version:
         raise _unprocessable(
             "template.embedding_model_version_mismatch",
-            "embeddings come from a different ArcFace model than this service runs",
+            "embeddings come from a different recognizer version than this service runs",
         )
     if any(m.quality.version != quality_version for m in body.members):
         raise _unprocessable(

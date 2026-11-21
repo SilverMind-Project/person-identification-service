@@ -8,12 +8,12 @@ Documentation: [silvermind-project.github.io](https://silvermind-project.github.
 
 ## Architecture
 
-- **Face Detection**: SCRFD from the Buffalo_L model pack
-- **Face Recognition**: ArcFace 512-dimensional embeddings with cosine similarity matching
+- **Face Detection**: SCRFD via the active recognizer profile (default `buffalo_l`)
+- **Face Recognition**: 512-dimensional embeddings via a configurable `RecognizerProfile` (default `buffalo_l` ArcFace; `adaface_ir50_webface4m` candidate profile preconfigured)
 - **Face Evidence**: 106-point landmarks, 68-point 3D landmarks, and gender/age attributes
 - **Motion Detection**: Cross-frame centroid tracking with face re-identification
 - **Runtime**: NVIDIA Triton Inference Server over gRPC
-- **Storage**: PostgreSQL (TimescaleDB + pgvector) for face gallery; MinIO for guest images
+- **Storage**: PostgreSQL (TimescaleDB + pgvector) for profile-scoped face gallery; MinIO for aligned 112x112 enrollment crops, calibration crops, and guest images
 
 ```mermaid
 flowchart LR
@@ -98,6 +98,7 @@ All settings in `config/settings.yaml` with `${ENV_VAR:default}` interpolation. 
 | Setting | Env var | Default | Description |
 | --- | --- | --- | --- |
 | `face_engine.triton_url` | `TRITON_GRPC_URL` | `triton:8701` | Triton gRPC endpoint |
+| `face_engine.active_profile` | `PERSON_ID_RECOGNIZER_PROFILE` | `buffalo_l` | Active recognizer profile name under `face_engine.profiles` |
 | `face_engine.model_profile` | `PERSON_ID_MODEL_PROFILE` | `full` | Health metadata: `full` or `int8` |
 | `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Per-request timeout |
 | `face_engine.det_threshold` | `DETECTION_THRESHOLD` | `0.6` | Face detection confidence |
@@ -109,6 +110,7 @@ All settings in `config/settings.yaml` with `${ENV_VAR:default}` interpolation. 
 | `minio.secret_key` | `MINIO_SECRET_KEY` | `minioadmin` | MinIO secret key |
 | `minio.bucket` | `MINIO_BUCKET` | `cognitive-companion` | S3 bucket name |
 | `calibration.artifact_path` | `CALIBRATION_ARTIFACT_PATH` | empty | Fitted calibration artifact; empty means no calibrated confidence |
+| `calibration.recognizer_version` | -- | active profile | Expected recognizer version for calibration compatibility |
 | `calibration_capture.enabled` | -- | `false` | Sample tracker faces for calibration labeling |
 | `logging.level` | `LOG_LEVEL` | `INFO` | Log verbosity |
 
@@ -284,11 +286,44 @@ Verify the selected runtime after startup:
 curl -s http://localhost:8200/health
 ```
 
-The response includes the configured Triton endpoint, the `full` or `int8`
-profile, and readiness state.
+The response includes the configured Triton endpoint, `active_profile`, `recognizer_version`,
+`licence`, the `full` or `int8` model profile, and readiness state.
 
-Face embeddings and centroids are stored in PostgreSQL (pgvector). Guest images
-are uploaded to MinIO.
+Face embeddings and centroids are stored in PostgreSQL (pgvector), partitioned by
+`recognizer_version`. Aligned 112x112 PNG crops of enrollment photos and promoted exemplars are
+retained locally in MinIO under `enrollment/<person_id>/<embedding_id>.png` so switching
+recognizers does not require re-photographing household members. Deleting a member removes all
+of their enrollment crops immediately.
+
+### Re-embedding a gallery for a new recognizer
+
+When evaluating or switching to another profile under `face_engine.profiles`:
+
+```bash
+DATABASE_URL=... TRITON_GRPC_URL=triton:8701 \
+  uv run python -m app.tools.reembed --profile adaface_ir50_webface4m
+```
+
+The command reads retained aligned crops from MinIO (skipping any legacy embeddings without a
+crop key, which it reports), runs the target profile's Triton recognition model, and writes a
+parallel set of embeddings, centroids, and pose-binned prototypes tagged with the target
+`recognizer_version` without altering the active profile's gallery. Switching
+`face_engine.active_profile` invalidates existing calibration artifacts until they are refitted
+for the new recognizer.
+
+## Model licensing
+
+- **Code**: This service is licensed under AGPL-3.0-or-later.
+- **Default `buffalo_l` weights**: InsightFace code is MIT-licensed, but the pretrained
+  `buffalo_l` model weights (SCRFD, ArcFace R50, landmarks, gender/age) are distributed for
+  **non-commercial research purposes only**. Deployers are responsible for model licensing
+  compliance; commercial deployments must supply commercially licensed or self-trained weights
+  and configure a matching profile under `face_engine.profiles`.
+- **Candidate `adaface_ir50_webface4m` profile**: `mk-minchul/AdaFace` code is MIT-licensed,
+  but public checkpoints trained on WebFace4M/WebFace12M or MS1MV2 inherit non-commercial
+  academic dataset restrictions. No pretrained weights are bundled with this repository.
+- `GET /health` reports the active profile's `licence` string alongside `active_profile` and
+  `recognizer_version`.
 
 ## Model provenance
 

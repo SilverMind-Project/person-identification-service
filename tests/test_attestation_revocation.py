@@ -338,7 +338,11 @@ async def test_migration_0007_refuses_while_revoked_and_round_trips(db_pool: asy
                 np.zeros(512, dtype=np.float32),
             )
 
-    # Down migration refuses while revoked rows exist.
+    # Step past any newer migrations above 0007, then verify 0007 refuses while revoked rows exist.
+    applied = [s.version for s in await status(db_pool) if s.applied]
+    above = len(applied) - applied.index("0007_attestation_revocation") - 1
+    if above > 0:
+        await rollback(db_pool, steps=above)
     with pytest.raises(asyncpg.RaiseError, match="revoked rows"):
         await rollback(db_pool, steps=1)
 

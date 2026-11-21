@@ -3,6 +3,8 @@
 ``EnrollmentRepository`` is the contract the enrollment and template services depend on. The
 Postgres implementation holds every gallery query except the shared embedding/centroid/prototype
 SQL in ``app.services.centroid`` (also used inside ``VisitorStore.name_cluster``'s transaction).
+Every gallery query is scoped to a single ``recognizer_version`` (defaulting to
+``DEFAULT_RECOGNIZER_VERSION``) so parallel galleries can coexist safely during recognizer swaps.
 The in-memory peer is kept honest by a parity test against Postgres.
 """
 
@@ -31,6 +33,7 @@ from app.services.prototype_builder import (
     PrototypePolicy,
     build_prototypes,
 )
+from app.services.recognizer_profile import DEFAULT_RECOGNIZER_VERSION
 
 UpsertStatus = Literal["enrolled", "updated"]
 
@@ -48,6 +51,9 @@ class CentroidHit:
 
 
 class EnrollmentRepository(Protocol):
+    @property
+    def recognizer_version(self) -> str: ...
+
     async def nearest_centroids(self, embedding: np.ndarray, k: int) -> list[CentroidHit]:
         """The ``k`` member centroids closest to ``embedding``, most similar first."""
         ...
@@ -66,7 +72,13 @@ class EnrollmentRepository(Protocol):
 
     async def insert_embeddings(
         self, person_id: str, embeddings: Sequence[np.ndarray | MemberEmbedding]
-    ) -> None: ...
+    ) -> list[int]:
+        """Insert embedding rows for the active recognizer version and return their ids."""
+        ...
+
+    async def set_embedding_crop_key(self, embedding_id: int, crop_object_key: str) -> None:
+        """Link an inserted embedding row to its retained MinIO crop key."""
+        ...
 
     async def add_member_embedding(
         self,
@@ -83,6 +95,19 @@ class EnrollmentRepository(Protocol):
         crop_object_key: str | None = None,
     ) -> int:
         """Append one provenance-tagged embedding and increment the member's gallery revision."""
+        ...
+
+    async def replace_profile_embeddings(
+        self,
+        person_id: str,
+        embeddings: Sequence[MemberEmbedding],
+        *,
+        policy: PrototypePolicy = PrototypePolicy(),
+    ) -> list[int]:
+        """Replace all embeddings, centroid, and prototypes for *(person_id, recognizer_version)*.
+
+        Other recognizer versions for the same member are never modified.
+        """
         ...
 
     async def bump_gallery_revision(self, person_id: str) -> int:
@@ -122,7 +147,7 @@ class EnrollmentRepository(Protocol):
         ...
 
     async def promoted_candidate_ids(self) -> set[str]:
-        """Return candidate ids already promoted into ``embeddings``."""
+        """Return candidate ids already promoted into ``embeddings`` for this recognizer."""
         ...
 
     async def backfill_missing_pose_bins(self, default_bin: PoseBin = "frontal") -> int:
@@ -136,17 +161,17 @@ class EnrollmentRepository(Protocol):
     async def get_member(self, person_id: str) -> MemberInfo | None: ...
 
     async def remove_member(self, person_id: str) -> bool:
-        """Delete the member with its embeddings, prototypes, and centroid; False if missing."""
+        """Delete the member with its embeddings, prototypes, and centroids across all versions."""
         ...
 
     async def member_count(self) -> int: ...
 
     async def member_embeddings(self) -> dict[str, list[np.ndarray]]:
-        """Every member's enrollment embeddings, oldest first (for offline calibration)."""
+        """Every member's enrollment embeddings for this recognizer, oldest first."""
         ...
 
     async def member_embedding_records(self) -> dict[str, list[MemberEmbedding]]:
-        """Every member's embeddings with pose/quality/source metadata, oldest first."""
+        """Every member's embeddings with pose/quality/source metadata for this recognizer."""
         ...
 
 
@@ -154,38 +179,43 @@ _SQL_NEAREST = """SELECT m.person_id, m.name, m.gallery_revision,
        1.0 - (c.centroid <=> $1::vector) AS similarity
 FROM centroids c
 JOIN members m ON m.person_id = c.person_id
+WHERE c.recognizer_version = $2
 ORDER BY c.centroid <=> $1::vector, m.person_id ASC
-LIMIT $2"""
+LIMIT $3"""
 
 _SQL_NEAREST_IDENTITIES = """SELECT m.person_id, m.name, m.gallery_revision,
        MAX(1.0 - (p.embedding <=> $1::vector)) AS similarity
 FROM face_prototypes p
 JOIN members m ON m.person_id = p.person_id
+WHERE p.recognizer_version = $2
 GROUP BY m.person_id, m.name, m.gallery_revision
 ORDER BY similarity DESC, m.person_id ASC
-LIMIT $2"""
+LIMIT $3"""
 
 _SQL_MEMBERS = """SELECT m.person_id, m.name, m.created_at, m.gallery_revision,
        count(e.id)::int AS embedding_count
 FROM members m
-LEFT JOIN embeddings e ON e.person_id = m.person_id
+LEFT JOIN embeddings e
+  ON e.person_id = m.person_id AND e.recognizer_version = $1
 GROUP BY m.person_id, m.name, m.created_at, m.gallery_revision
 ORDER BY m.name"""
 
 _SQL_MEMBER = """SELECT m.person_id, m.name, m.created_at, m.gallery_revision,
        count(e.id)::int AS embedding_count
 FROM members m
-LEFT JOIN embeddings e ON e.person_id = m.person_id
+LEFT JOIN embeddings e
+  ON e.person_id = m.person_id AND e.recognizer_version = $2
 WHERE m.person_id = $1
 GROUP BY m.person_id, m.name, m.created_at, m.gallery_revision"""
 
 _SQL_PROTOTYPE_COUNTS = """SELECT person_id, pose_bin, count(*)::int AS cnt
 FROM face_prototypes
+WHERE recognizer_version = $1
 GROUP BY person_id, pose_bin"""
 
 _SQL_MEMBER_PROTOTYPE_COUNTS = """SELECT pose_bin, count(*)::int AS cnt
 FROM face_prototypes
-WHERE person_id = $1
+WHERE person_id = $1 AND recognizer_version = $2
 GROUP BY pose_bin"""
 
 
@@ -217,18 +247,28 @@ def _prototype_from_row(row: asyncpg.Record) -> Prototype:
         approved_by=row["approved_by"],
         approved_at=row["approved_at"],
         created_at=row["created_at"],
+        recognizer_version=str(row["recognizer_version"]),
     )
 
 
 class PostgresEnrollmentRepository:
     """The gallery in PostgreSQL with pgvector; the pool must register the vector codec."""
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        recognizer_version: str = DEFAULT_RECOGNIZER_VERSION,
+    ) -> None:
         self._pool = pool
+        self._recognizer_version = recognizer_version
+
+    @property
+    def recognizer_version(self) -> str:
+        return self._recognizer_version
 
     async def nearest_centroids(self, embedding: np.ndarray, k: int) -> list[CentroidHit]:
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_SQL_NEAREST, embedding, k)
+            rows = await conn.fetch(_SQL_NEAREST, embedding, self._recognizer_version, k)
         return [
             CentroidHit(
                 person_id=str(r["person_id"]),
@@ -241,7 +281,7 @@ class PostgresEnrollmentRepository:
 
     async def nearest_identities(self, embedding: np.ndarray, k: int) -> list[CentroidHit]:
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_SQL_NEAREST_IDENTITIES, embedding, k)
+            rows = await conn.fetch(_SQL_NEAREST_IDENTITIES, embedding, self._recognizer_version, k)
         return [
             CentroidHit(
                 person_id=str(r["person_id"]),
@@ -262,7 +302,10 @@ class PostgresEnrollmentRepository:
     async def embedding_count(self, person_id: str) -> int:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT count(*) AS cnt FROM embeddings WHERE person_id = $1", person_id
+                """SELECT count(*) AS cnt FROM embeddings
+                   WHERE person_id = $1 AND recognizer_version = $2""",
+                person_id,
+                self._recognizer_version,
             )
         return int(row["cnt"])
 
@@ -283,9 +326,22 @@ class PostgresEnrollmentRepository:
 
     async def insert_embeddings(
         self, person_id: str, embeddings: Sequence[np.ndarray | MemberEmbedding]
-    ) -> None:
+    ) -> list[int]:
         async with self._pool.acquire() as conn:
-            await insert_embeddings(conn, person_id, embeddings)
+            return await insert_embeddings(
+                conn, person_id, embeddings, recognizer_version=self._recognizer_version
+            )
+
+    async def set_embedding_crop_key(self, embedding_id: int, crop_object_key: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE embeddings
+                   SET crop_object_key = $1
+                   WHERE id = $2 AND recognizer_version = $3""",
+                crop_object_key,
+                embedding_id,
+                self._recognizer_version,
+            )
 
     async def add_member_embedding(
         self,
@@ -311,14 +367,53 @@ class PostgresEnrollmentRepository:
             approved_by=approved_by,
             approved_at=approved_at,
             crop_object_key=crop_object_key,
+            recognizer_version=self._recognizer_version,
         )
         async with self._pool.acquire() as conn, conn.transaction():
-            ids = await insert_embeddings(conn, person_id, [record])
+            ids = await insert_embeddings(
+                conn, person_id, [record], recognizer_version=self._recognizer_version
+            )
             await conn.execute(
                 "UPDATE members SET gallery_revision = gallery_revision + 1 WHERE person_id = $1",
                 person_id,
             )
         return ids[0]
+
+    async def replace_profile_embeddings(
+        self,
+        person_id: str,
+        embeddings: Sequence[MemberEmbedding],
+        *,
+        policy: PrototypePolicy = PrototypePolicy(),
+    ) -> list[int]:
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "DELETE FROM face_prototypes WHERE person_id = $1 AND recognizer_version = $2",
+                person_id,
+                self._recognizer_version,
+            )
+            await conn.execute(
+                "DELETE FROM centroids WHERE person_id = $1 AND recognizer_version = $2",
+                person_id,
+                self._recognizer_version,
+            )
+            await conn.execute(
+                "DELETE FROM embeddings WHERE person_id = $1 AND recognizer_version = $2",
+                person_id,
+                self._recognizer_version,
+            )
+            if not embeddings:
+                return []
+            ids = await insert_embeddings(
+                conn, person_id, embeddings, recognizer_version=self._recognizer_version
+            )
+            await recompute_member_centroid(
+                conn, person_id, recognizer_version=self._recognizer_version
+            )
+            await rebuild_member_prototypes(
+                conn, person_id, policy, recognizer_version=self._recognizer_version
+            )
+        return ids
 
     async def bump_gallery_revision(self, person_id: str) -> int:
         async with self._pool.acquire() as conn:
@@ -339,22 +434,27 @@ class PostgresEnrollmentRepository:
 
     async def recompute_centroid(self, person_id: str) -> np.ndarray:
         async with self._pool.acquire() as conn:
-            return await recompute_member_centroid(conn, person_id)
+            return await recompute_member_centroid(
+                conn, person_id, recognizer_version=self._recognizer_version
+            )
 
     async def replace_prototypes(self, person_id: str, prototypes: Sequence[Prototype]) -> None:
         async with self._pool.acquire() as conn, conn.transaction():
-            await replace_member_prototypes(conn, person_id, prototypes)
+            await replace_member_prototypes(
+                conn, person_id, prototypes, recognizer_version=self._recognizer_version
+            )
 
     async def list_prototypes(self, person_id: str) -> list[Prototype]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT prototype_id, person_id, pose_bin, embedding, member_count, source,
                           quality_score, quality_version, crop_object_key, source_embedding_id,
-                          approved_by, approved_at, created_at
+                          approved_by, approved_at, created_at, recognizer_version
                    FROM face_prototypes
-                   WHERE person_id = $1
+                   WHERE person_id = $1 AND recognizer_version = $2
                    ORDER BY pose_bin, quality_score DESC NULLS LAST, prototype_id""",
                 person_id,
+                self._recognizer_version,
             )
         return [_prototype_from_row(r) for r in rows]
 
@@ -362,7 +462,9 @@ class PostgresEnrollmentRepository:
         self, person_id: str, policy: PrototypePolicy = PrototypePolicy()
     ) -> list[Prototype]:
         async with self._pool.acquire() as conn, conn.transaction():
-            return await rebuild_member_prototypes(conn, person_id, policy)
+            return await rebuild_member_prototypes(
+                conn, person_id, policy, recognizer_version=self._recognizer_version
+            )
 
     async def delete_prototype(
         self,
@@ -374,9 +476,12 @@ class PostgresEnrollmentRepository:
             proto = await conn.fetchrow(
                 """SELECT pose_bin, source_embedding_id
                    FROM face_prototypes
-                   WHERE person_id = $1 AND prototype_id = $2::uuid""",
+                   WHERE person_id = $1
+                     AND prototype_id = $2::uuid
+                     AND recognizer_version = $3""",
                 person_id,
                 prototype_id,
+                self._recognizer_version,
             )
             if proto is None:
                 return False
@@ -385,8 +490,10 @@ class PostgresEnrollmentRepository:
             if source_emb_id is not None:
                 remaining = int(
                     await conn.fetchval(
-                        "SELECT count(*) FROM embeddings WHERE person_id = $1 AND id <> $2",
+                        """SELECT count(*) FROM embeddings
+                           WHERE person_id = $1 AND recognizer_version = $2 AND id <> $3""",
                         person_id,
+                        self._recognizer_version,
                         int(source_emb_id),
                     )
                 )
@@ -394,8 +501,11 @@ class PostgresEnrollmentRepository:
                 remaining = int(
                     await conn.fetchval(
                         """SELECT count(*) FROM embeddings
-                           WHERE person_id = $1 AND COALESCE(pose_bin, 'frontal') <> $2""",
+                           WHERE person_id = $1
+                             AND recognizer_version = $2
+                             AND COALESCE(pose_bin, 'frontal') <> $3""",
                         person_id,
+                        self._recognizer_version,
                         proto["pose_bin"],
                     )
                 )
@@ -406,19 +516,28 @@ class PostgresEnrollmentRepository:
 
             if source_emb_id is not None:
                 await conn.execute(
-                    "DELETE FROM embeddings WHERE person_id = $1 AND id = $2",
+                    """DELETE FROM embeddings
+                       WHERE person_id = $1 AND recognizer_version = $2 AND id = $3""",
                     person_id,
+                    self._recognizer_version,
                     int(source_emb_id),
                 )
             else:
                 await conn.execute(
                     """DELETE FROM embeddings
-                       WHERE person_id = $1 AND COALESCE(pose_bin, 'frontal') = $2""",
+                       WHERE person_id = $1
+                         AND recognizer_version = $2
+                         AND COALESCE(pose_bin, 'frontal') = $3""",
                     person_id,
+                    self._recognizer_version,
                     proto["pose_bin"],
                 )
-            await recompute_member_centroid(conn, person_id)
-            await rebuild_member_prototypes(conn, person_id, policy)
+            await recompute_member_centroid(
+                conn, person_id, recognizer_version=self._recognizer_version
+            )
+            await rebuild_member_prototypes(
+                conn, person_id, policy, recognizer_version=self._recognizer_version
+            )
             await conn.execute(
                 "UPDATE members SET gallery_revision = gallery_revision + 1 WHERE person_id = $1",
                 person_id,
@@ -441,23 +560,27 @@ class PostgresEnrollmentRepository:
             rows = await conn.fetch(
                 """SELECT DISTINCT source_candidate_id
                    FROM embeddings
-                   WHERE source_candidate_id IS NOT NULL"""
+                   WHERE source_candidate_id IS NOT NULL AND recognizer_version = $1""",
+                self._recognizer_version,
             )
         return {str(r["source_candidate_id"]) for r in rows}
 
     async def backfill_missing_pose_bins(self, default_bin: PoseBin = "frontal") -> int:
         async with self._pool.acquire() as conn:
             result = await conn.execute(
-                "UPDATE embeddings SET pose_bin = $1 WHERE pose_bin IS NULL",
+                """UPDATE embeddings
+                   SET pose_bin = $1
+                   WHERE pose_bin IS NULL AND recognizer_version = $2""",
                 default_bin,
+                self._recognizer_version,
             )
         # asyncpg returns "UPDATE N"
         return int(result.split()[-1])
 
     async def list_members(self) -> list[MemberInfo]:
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_SQL_MEMBERS)
-            proto_rows = await conn.fetch(_SQL_PROTOTYPE_COUNTS)
+            rows = await conn.fetch(_SQL_MEMBERS, self._recognizer_version)
+            proto_rows = await conn.fetch(_SQL_PROTOTYPE_COUNTS, self._recognizer_version)
         counts_by_person: dict[str, dict[str, int]] = {}
         for r in proto_rows:
             counts_by_person.setdefault(str(r["person_id"]), {})[str(r["pose_bin"])] = int(r["cnt"])
@@ -465,10 +588,12 @@ class PostgresEnrollmentRepository:
 
     async def get_member(self, person_id: str) -> MemberInfo | None:
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(_SQL_MEMBER, person_id)
+            row = await conn.fetchrow(_SQL_MEMBER, person_id, self._recognizer_version)
             if not row:
                 return None
-            proto_rows = await conn.fetch(_SQL_MEMBER_PROTOTYPE_COUNTS, person_id)
+            proto_rows = await conn.fetch(
+                _SQL_MEMBER_PROTOTYPE_COUNTS, person_id, self._recognizer_version
+            )
         counts = {str(r["pose_bin"]): int(r["cnt"]) for r in proto_rows}
         return _member_info(row, counts)
 
@@ -484,7 +609,8 @@ class PostgresEnrollmentRepository:
                    WHERE attributed_person_id = $1""",
                 person_id,
             )
-            # ON DELETE CASCADE removes the member's embeddings, face_prototypes, and centroid.
+            # ON DELETE CASCADE removes the member's embeddings, face_prototypes, and centroids
+            # across every recognizer_version.
             result = await conn.execute("DELETE FROM members WHERE person_id = $1", person_id)
         return bool(result != "DELETE 0")
 
@@ -502,9 +628,11 @@ class PostgresEnrollmentRepository:
             rows = await conn.fetch(
                 """SELECT id, person_id, embedding, pose_bin, source, quality_score,
                           quality_version, source_candidate_id, approved_by, approved_at,
-                          crop_object_key
+                          crop_object_key, recognizer_version
                    FROM embeddings
-                   ORDER BY person_id, created_at, id"""
+                   WHERE recognizer_version = $1
+                   ORDER BY person_id, created_at, id""",
+                self._recognizer_version,
             )
         gallery: dict[str, list[MemberEmbedding]] = {}
         for r in rows:
@@ -522,6 +650,7 @@ class PostgresEnrollmentRepository:
                     approved_by=r["approved_by"],
                     approved_at=r["approved_at"],
                     crop_object_key=r["crop_object_key"],
+                    recognizer_version=str(r["recognizer_version"]),
                 )
             )
         return gallery
@@ -532,6 +661,16 @@ class _Member:
     name: str
     created_at: datetime
     gallery_revision: int = 1
+
+
+@dataclass
+class _InMemoryGalleryState:
+    members: dict[str, _Member]
+    # Keyed by (person_id, recognizer_version).
+    embeddings: dict[tuple[str, str], list[MemberEmbedding]]
+    centroids: dict[tuple[str, str], np.ndarray]
+    prototypes: dict[tuple[str, str], list[Prototype]]
+    next_embedding_id: int = 1
 
 
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
@@ -548,71 +687,90 @@ class InMemoryEnrollmentRepository:
     case names.
     """
 
-    def __init__(self) -> None:
-        self._members: dict[str, _Member] = {}
-        self._embeddings: dict[str, list[MemberEmbedding]] = {}
-        self._centroids: dict[str, np.ndarray] = {}
-        self._prototypes: dict[str, list[Prototype]] = {}
-        self._next_embedding_id = 1
+    def __init__(
+        self,
+        recognizer_version: str = DEFAULT_RECOGNIZER_VERSION,
+        *,
+        _state: _InMemoryGalleryState | None = None,
+    ) -> None:
+        self._recognizer_version = recognizer_version
+        self._state = (
+            _state
+            if _state is not None
+            else _InMemoryGalleryState(members={}, embeddings={}, centroids={}, prototypes={})
+        )
+
+    @property
+    def recognizer_version(self) -> str:
+        return self._recognizer_version
+
+    def for_recognizer_version(self, recognizer_version: str) -> InMemoryEnrollmentRepository:
+        """Return a view over the same backing store scoped to another recognizer version."""
+        return InMemoryEnrollmentRepository(recognizer_version, _state=self._state)
 
     async def nearest_centroids(self, embedding: np.ndarray, k: int) -> list[CentroidHit]:
         hits = [
             CentroidHit(
                 person_id=person_id,
-                name=self._members[person_id].name,
+                name=self._state.members[person_id].name,
                 similarity=_cosine(centroid, embedding),
-                gallery_revision=self._members[person_id].gallery_revision,
+                gallery_revision=self._state.members[person_id].gallery_revision,
             )
-            for person_id, centroid in self._centroids.items()
-            if person_id in self._members
+            for (person_id, version), centroid in self._state.centroids.items()
+            if version == self._recognizer_version and person_id in self._state.members
         ]
         hits.sort(key=lambda hit: (-hit.similarity, hit.person_id))
         return hits[:k]
 
     async def nearest_identities(self, embedding: np.ndarray, k: int) -> list[CentroidHit]:
         hits: list[CentroidHit] = []
-        for person_id, protos in self._prototypes.items():
-            if person_id not in self._members or not protos:
+        for (person_id, version), protos in self._state.prototypes.items():
+            if version != self._recognizer_version or person_id not in self._state.members:
+                continue
+            if not protos:
                 continue
             best_sim = max(_cosine(p.embedding, embedding) for p in protos)
             hits.append(
                 CentroidHit(
                     person_id=person_id,
-                    name=self._members[person_id].name,
+                    name=self._state.members[person_id].name,
                     similarity=best_sim,
-                    gallery_revision=self._members[person_id].gallery_revision,
+                    gallery_revision=self._state.members[person_id].gallery_revision,
                 )
             )
         hits.sort(key=lambda hit: (-hit.similarity, hit.person_id))
         return hits[:k]
 
     async def member_exists(self, person_id: str) -> bool:
-        return person_id in self._members
+        return person_id in self._state.members
 
     async def embedding_count(self, person_id: str) -> int:
-        return len(self._embeddings.get(person_id, []))
+        return len(self._state.embeddings.get((person_id, self._recognizer_version), []))
 
     async def upsert_member(self, person_id: str, name: str) -> UpsertStatus:
-        existing = self._members.get(person_id)
+        existing = self._state.members.get(person_id)
         if existing is not None:
             existing.name = name
             return "updated"
-        self._members[person_id] = _Member(name=name, created_at=datetime.now(UTC))
+        self._state.members[person_id] = _Member(name=name, created_at=datetime.now(UTC))
         return "enrolled"
 
     async def insert_embeddings(
         self, person_id: str, embeddings: Sequence[np.ndarray | MemberEmbedding]
-    ) -> None:
-        bucket = self._embeddings.setdefault(person_id, [])
+    ) -> list[int]:
+        bucket = self._state.embeddings.setdefault((person_id, self._recognizer_version), [])
+        ids: list[int] = []
         for item in embeddings:
-            emb_id = self._next_embedding_id
-            self._next_embedding_id += 1
+            emb_id = self._state.next_embedding_id
+            self._state.next_embedding_id += 1
+            ids.append(emb_id)
             if isinstance(item, MemberEmbedding):
                 bucket.append(
                     replace(
                         item,
                         embedding=np.asarray(item.embedding, dtype=np.float32),
                         embedding_id=emb_id,
+                        recognizer_version=self._recognizer_version,
                     )
                 )
             else:
@@ -620,8 +778,19 @@ class InMemoryEnrollmentRepository:
                     MemberEmbedding(
                         embedding=np.asarray(item, dtype=np.float32),
                         embedding_id=emb_id,
+                        recognizer_version=self._recognizer_version,
                     )
                 )
+        return ids
+
+    async def set_embedding_crop_key(self, embedding_id: int, crop_object_key: str) -> None:
+        for (pid, version), items in self._state.embeddings.items():
+            if version != self._recognizer_version:
+                continue
+            self._state.embeddings[(pid, version)] = [
+                replace(e, crop_object_key=crop_object_key) if e.embedding_id == embedding_id else e
+                for e in items
+            ]
 
     async def add_member_embedding(
         self,
@@ -637,9 +806,9 @@ class InMemoryEnrollmentRepository:
         approved_at: datetime | None = None,
         crop_object_key: str | None = None,
     ) -> int:
-        emb_id = self._next_embedding_id
-        self._next_embedding_id += 1
-        self._embeddings.setdefault(person_id, []).append(
+        emb_id = self._state.next_embedding_id
+        self._state.next_embedding_id += 1
+        self._state.embeddings.setdefault((person_id, self._recognizer_version), []).append(
             MemberEmbedding(
                 embedding=np.asarray(embedding, dtype=np.float32),
                 embedding_id=emb_id,
@@ -651,36 +820,62 @@ class InMemoryEnrollmentRepository:
                 approved_by=approved_by,
                 approved_at=approved_at,
                 crop_object_key=crop_object_key,
+                recognizer_version=self._recognizer_version,
             )
         )
-        if person_id in self._members:
-            self._members[person_id].gallery_revision += 1
+        if person_id in self._state.members:
+            self._state.members[person_id].gallery_revision += 1
         return emb_id
 
+    async def replace_profile_embeddings(
+        self,
+        person_id: str,
+        embeddings: Sequence[MemberEmbedding],
+        *,
+        policy: PrototypePolicy = PrototypePolicy(),
+    ) -> list[int]:
+        key = (person_id, self._recognizer_version)
+        self._state.prototypes.pop(key, None)
+        self._state.centroids.pop(key, None)
+        self._state.embeddings.pop(key, None)
+        if not embeddings:
+            return []
+        ids = await self.insert_embeddings(person_id, embeddings)
+        await self.recompute_centroid(person_id)
+        await self.rebuild_prototypes(person_id, policy)
+        return ids
+
     async def bump_gallery_revision(self, person_id: str) -> int:
-        member = self._members.get(person_id)
+        member = self._state.members.get(person_id)
         if member is None:
             raise LookupError(f"member '{person_id}' not found")
         member.gallery_revision += 1
         return member.gallery_revision
 
     async def get_gallery_revisions(self) -> dict[str, int]:
-        return {pid: m.gallery_revision for pid, m in self._members.items()}
+        return {pid: m.gallery_revision for pid, m in self._state.members.items()}
 
     async def recompute_centroid(self, person_id: str) -> np.ndarray:
-        centroid = np.mean([e.embedding for e in self._embeddings[person_id]], axis=0)
+        items = self._state.embeddings[(person_id, self._recognizer_version)]
+        centroid = np.mean([e.embedding for e in items], axis=0)
         centroid = (centroid / np.linalg.norm(centroid)).astype(np.float32)
-        self._centroids[person_id] = centroid
+        self._state.centroids[(person_id, self._recognizer_version)] = centroid
         return centroid
 
     async def replace_prototypes(self, person_id: str, prototypes: Sequence[Prototype]) -> None:
         now = datetime.now(UTC)
-        self._prototypes[person_id] = [
-            replace(p, person_id=person_id, created_at=p.created_at or now) for p in prototypes
+        self._state.prototypes[(person_id, self._recognizer_version)] = [
+            replace(
+                p,
+                person_id=person_id,
+                created_at=p.created_at or now,
+                recognizer_version=self._recognizer_version,
+            )
+            for p in prototypes
         ]
 
     async def list_prototypes(self, person_id: str) -> list[Prototype]:
-        protos = list(self._prototypes.get(person_id, []))
+        protos = list(self._state.prototypes.get((person_id, self._recognizer_version), []))
         protos.sort(
             key=lambda p: (
                 p.pose_bin,
@@ -693,7 +888,12 @@ class InMemoryEnrollmentRepository:
     async def rebuild_prototypes(
         self, person_id: str, policy: PrototypePolicy = PrototypePolicy()
     ) -> list[Prototype]:
-        built = build_prototypes(person_id, self._embeddings.get(person_id, []), policy)
+        built = build_prototypes(
+            person_id,
+            self._state.embeddings.get((person_id, self._recognizer_version), []),
+            policy,
+            recognizer_version=self._recognizer_version,
+        )
         await self.replace_prototypes(person_id, built)
         return built
 
@@ -703,11 +903,12 @@ class InMemoryEnrollmentRepository:
         prototype_id: str,
         policy: PrototypePolicy = PrototypePolicy(),
     ) -> bool:
-        protos = self._prototypes.get(person_id, [])
+        key = (person_id, self._recognizer_version)
+        protos = self._state.prototypes.get(key, [])
         target = next((p for p in protos if p.prototype_id == prototype_id), None)
         if target is None:
             return False
-        current = self._embeddings.get(person_id, [])
+        current = self._state.embeddings.get(key, [])
         if target.source_embedding_id is not None:
             remaining = [e for e in current if e.embedding_id != target.source_embedding_id]
         else:
@@ -716,21 +917,21 @@ class InMemoryEnrollmentRepository:
             raise ValueError(
                 "cannot remove the last embedding of a member; delete enrollment instead"
             )
-        self._embeddings[person_id] = remaining
+        self._state.embeddings[key] = remaining
         await self.recompute_centroid(person_id)
         await self.rebuild_prototypes(person_id, policy)
-        if person_id in self._members:
-            self._members[person_id].gallery_revision += 1
+        if person_id in self._state.members:
+            self._state.members[person_id].gallery_revision += 1
         return True
 
     async def clear_crop_reference(self, crop_object_key: str) -> None:
-        for pid, items in self._embeddings.items():
-            self._embeddings[pid] = [
+        for key, items in self._state.embeddings.items():
+            self._state.embeddings[key] = [
                 replace(e, crop_object_key=None) if e.crop_object_key == crop_object_key else e
                 for e in items
             ]
-        for pid, protos in self._prototypes.items():
-            self._prototypes[pid] = [
+        for key, protos in self._state.prototypes.items():
+            self._state.prototypes[key] = [
                 replace(p, crop_object_key=None) if p.crop_object_key == crop_object_key else p
                 for p in protos
             ]
@@ -738,14 +939,17 @@ class InMemoryEnrollmentRepository:
     async def promoted_candidate_ids(self) -> set[str]:
         return {
             e.source_candidate_id
-            for items in self._embeddings.values()
+            for (_, version), items in self._state.embeddings.items()
+            if version == self._recognizer_version
             for e in items
             if e.source_candidate_id is not None
         }
 
     async def backfill_missing_pose_bins(self, default_bin: PoseBin = "frontal") -> int:
         updated = 0
-        for pid, items in self._embeddings.items():
+        for (pid, version), items in self._state.embeddings.items():
+            if version != self._recognizer_version:
+                continue
             new_items: list[MemberEmbedding] = []
             for e in items:
                 if e.pose_bin is None:
@@ -753,51 +957,53 @@ class InMemoryEnrollmentRepository:
                     updated += 1
                 else:
                     new_items.append(e)
-            self._embeddings[pid] = new_items
+            self._state.embeddings[(pid, version)] = new_items
         return updated
 
     async def list_members(self) -> list[MemberInfo]:
         return [
             self._info(person_id)
-            for person_id in sorted(self._members, key=lambda pid: self._members[pid].name)
+            for person_id in sorted(
+                self._state.members, key=lambda pid: self._state.members[pid].name
+            )
         ]
 
     async def get_member(self, person_id: str) -> MemberInfo | None:
-        return self._info(person_id) if person_id in self._members else None
+        return self._info(person_id) if person_id in self._state.members else None
 
     async def remove_member(self, person_id: str) -> bool:
-        if person_id not in self._members:
+        if person_id not in self._state.members:
             return False
-        del self._members[person_id]
-        self._embeddings.pop(person_id, None)
-        self._centroids.pop(person_id, None)
-        self._prototypes.pop(person_id, None)
+        del self._state.members[person_id]
+        for store in (self._state.embeddings, self._state.centroids, self._state.prototypes):
+            for key in [k for k in store if k[0] == person_id]:
+                del store[key]
         return True
 
     async def member_count(self) -> int:
-        return len(self._members)
+        return len(self._state.members)
 
     async def member_embeddings(self) -> dict[str, list[np.ndarray]]:
-        return {
-            person_id: [e.embedding for e in items]
-            for person_id, items in sorted(self._embeddings.items())
-            if items
-        }
+        records = await self.member_embedding_records()
+        return {person_id: [e.embedding for e in items] for person_id, items in records.items()}
 
     async def member_embedding_records(self) -> dict[str, list[MemberEmbedding]]:
         return {
-            person_id: list(items) for person_id, items in sorted(self._embeddings.items()) if items
+            person_id: list(items)
+            for (person_id, version), items in sorted(self._state.embeddings.items())
+            if version == self._recognizer_version and items
         }
 
     def _info(self, person_id: str) -> MemberInfo:
-        member = self._members[person_id]
+        member = self._state.members[person_id]
+        key = (person_id, self._recognizer_version)
         counts: dict[str, int] = {}
-        for proto in self._prototypes.get(person_id, []):
+        for proto in self._state.prototypes.get(key, []):
             counts[proto.pose_bin] = counts.get(proto.pose_bin, 0) + 1
         return MemberInfo(
             person_id=person_id,
             name=member.name,
-            embedding_count=len(self._embeddings.get(person_id, [])),
+            embedding_count=len(self._state.embeddings.get(key, [])),
             created_at=member.created_at,
             gallery_revision=member.gallery_revision,
             prototype_counts=dict(sorted(counts.items())),

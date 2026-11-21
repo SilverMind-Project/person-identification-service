@@ -91,6 +91,23 @@ Rules:
   `prototypes.min_promotion_quality`, and `prototypes.min_promotion_interocular_px`. Promotion
   increments `members.gallery_revision` and rebuilds prototypes; a calibration label alone never
   changes the gallery.
+- **Recognizer profiles and re-embedding** (`app/services/recognizer_profile.py`,
+  `app/tools/reembed.py`, migration `0008_recognizer_version`): all five Triton model names,
+  alignment template, input size, color space (`rgb` or `bgr`), normalization mean/std, tensor
+  names, preprocessing version, and licence live in a frozen `RecognizerProfile` loaded from
+  `face_engine.active_profile` and `face_engine.profiles`. All six embedding-bearing tables
+  (`embeddings`, `centroids` with composite PK `(person_id, recognizer_version)`,
+  `face_prototypes`, `calibration_candidates`, `visitor_clusters`, `visitor_sightings`) are
+  partitioned by `recognizer_version`, enforced at the repository layer (`EnrollmentRepository`
+  and `VisitorStore`) with Postgres/in-memory parity tests. `FaceDetection` and calibration
+  artifacts carry canonical `recognizer_version`; deprecation window open for the legacy
+  `arcface_model_version` alias (kept synchronized for one release while all consumers read
+  `recognizer_version` first).
+- **Enrollment crop retention**: `EnrollmentStore.enroll` and `promote_candidate` retain the
+  112x112 aligned PNG crop in MinIO under `enrollment/<person_id>/<embedding_id>.png` (linked via
+  `embeddings.crop_object_key`) so `python -m app.tools.reembed --profile <name>` can rebuild a
+  parallel gallery without re-photographing household members. `remove_member` deletes the entire
+  `enrollment/<person_id>/` prefix and associated calibration candidates immediately.
 - Side effects are explicit. `/identify` currently writes visitor sightings for unknown faces on
   every call (`_ingest_unknown_faces` in `app/routers/identification.py`) and, with
   `calibration_capture.enabled` and a `capture_context`, queues sampled faces as calibration

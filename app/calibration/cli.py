@@ -89,7 +89,7 @@ def _cmd_fit(args: argparse.Namespace) -> int:
     print("PASS: all gates satisfied")
     print(f"  method:               {artifact.method}")
     print(f"  artifact_version:     {artifact.artifact_version}")
-    print(f"  arcface_model:        {artifact.arcface_model_version}")
+    print(f"  recognizer_version:   {artifact.recognizer_version}")
     print(f"  model_profile:        {artifact.model_profile}")
     print(f"  preprocessing:        {artifact.preprocessing_version}")
     print(f"  fit_pairs:            {sc.fit_pairs} (+{sc.fit_positives} / -{sc.fit_negatives})")
@@ -185,7 +185,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     template = args.calibration_profile == "template"
     evaluator = CalibrationEvaluator.from_artifact_path(
         args.artifact,
-        expected_arcface_model_version=args.arcface_model_version or "",
+        expected_recognizer_version=args.arcface_model_version or "",
         expected_model_profile=args.model_profile or "",
         expected_preprocessing_version=args.preprocessing_version or "",
         expected_quality_version=args.quality_version or "",
@@ -196,7 +196,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     state = evaluator.health()
     print(f"calibration_health: {state}")
     print(f"artifact_version:   {evaluator.artifact_version()}")
-    print(f"arcface_model:      {evaluator.arcface_model_version()}")
+    print(f"recognizer_version: {evaluator.recognizer_version()}")
     print(f"model_profile:      {evaluator.model_profile()}")
     print(f"preprocessing:      {evaluator.preprocessing_version()}")
     if evaluator.quality_version():
@@ -232,12 +232,24 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
     from app.services.enrollment_repository import PostgresEnrollmentRepository
     from app.services.prototype_builder import PrototypePolicy
+    from app.services.recognizer_profile import (
+        get_recognizer_profile,
+        load_active_recognizer_profile,
+    )
     from app.services.template_aggregation import QualityWeightedMeanAggregator
 
     dsn = config.get("database.dsn")
     if not dsn:
         print("FAIL: database.dsn is not configured (set DATABASE_URL)")
         return 1
+
+    face_cfg = config.get("face_engine", {}) or {}
+    profile = (
+        get_recognizer_profile(face_cfg, args.recognizer_profile)
+        if args.recognizer_profile
+        else load_active_recognizer_profile(face_cfg)
+    )
+    target_recognizer_version = args.recognizer_version or profile.recognizer_version
 
     async def _init(conn: asyncpg.Connection) -> None:
         await register_vector(conn)
@@ -252,20 +264,25 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     )
     try:
         candidate_repo = PostgresCalibrationCandidateRepository(pool)
-        candidates = await candidate_repo.list_labeled()
-        attested = await candidate_repo.list_attested() if args.include_attested else []
-        repo = PostgresEnrollmentRepository(pool)
+        candidates = await candidate_repo.list_labeled(recognizer_version=target_recognizer_version)
+        attested = (
+            await candidate_repo.list_attested(recognizer_version=target_recognizer_version)
+            if args.include_attested
+            else []
+        )
+        repo = PostgresEnrollmentRepository(pool, recognizer_version=target_recognizer_version)
         embedding_records = await repo.member_embedding_records()
         gallery_revisions = await repo.get_gallery_revisions()
     finally:
         await pool.close()
 
     proto_cfg = config.get("prototypes", {}) or {}
+    base_quality_version = str(config.get("face_quality.scorer", "heuristic-v1"))
     prototype_policy = PrototypePolicy(
         min_members_per_bin=int(proto_cfg.get("min_members_per_bin", 3)),
         max_per_bin=int(proto_cfg.get("max_per_bin", 6)),
         missing_quality_weight=float(proto_cfg.get("missing_quality_weight", 0.5)),
-        expected_quality_version=str(config.get("face_quality.scorer", "heuristic-v1")),
+        expected_quality_version=profile.scoped_quality_version(base_quality_version),
         min_promotion_quality=float(proto_cfg.get("min_promotion_quality", 0.5)),
         min_promotion_interocular_px=float(proto_cfg.get("min_promotion_interocular_px", 24.0)),
     )
@@ -435,7 +452,12 @@ def main(argv: list[str] | None = None) -> int:
     p_fit.add_argument(
         "--method", choices=["logistic", "isotonic"], default="logistic", help="Calibration method"
     )
-    p_fit.add_argument("--arcface-model-version", dest="arcface_model_version", default="buffalo_l")
+    p_fit.add_argument(
+        "--recognizer-version",
+        "--arcface-model-version",
+        dest="arcface_model_version",
+        default="buffalo_l",
+    )
     p_fit.add_argument("--model-profile", dest="model_profile", default="full")
     p_fit.add_argument("--preprocessing-version", dest="preprocessing_version", default="v1")
     p_fit.add_argument("--random-seed", dest="random_seed", type=int, default=42)
@@ -452,7 +474,12 @@ def main(argv: list[str] | None = None) -> int:
     p_eval = sub.add_parser("evaluate", help="Evaluate an artifact against a dataset")
     p_eval.add_argument("--artifact", required=True, help="Path to artifact JSON")
     p_eval.add_argument("--pairs", required=True, help="Path to pairs JSON file")
-    p_eval.add_argument("--arcface-model-version", dest="arcface_model_version", default=None)
+    p_eval.add_argument(
+        "--recognizer-version",
+        "--arcface-model-version",
+        dest="arcface_model_version",
+        default=None,
+    )
     p_eval.add_argument("--model-profile", dest="model_profile", default=None)
     p_eval.add_argument("--preprocessing-version", dest="preprocessing_version", default=None)
     p_eval.add_argument("--operating-point", dest="operating_point", type=float, default=0.80)
@@ -464,7 +491,12 @@ def main(argv: list[str] | None = None) -> int:
     # -- validate --
     p_val = sub.add_parser("validate", help="Validate artifact schema and checks")
     p_val.add_argument("--artifact", required=True, help="Path to artifact JSON")
-    p_val.add_argument("--arcface-model-version", dest="arcface_model_version", default=None)
+    p_val.add_argument(
+        "--recognizer-version",
+        "--arcface-model-version",
+        dest="arcface_model_version",
+        default=None,
+    )
     p_val.add_argument("--model-profile", dest="model_profile", default=None)
     p_val.add_argument("--preprocessing-version", dest="preprocessing_version", default=None)
     p_val.add_argument("--quality-version", dest="quality_version", default=None)
@@ -515,6 +547,18 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=20,
         help="template profile: templates drawn per episode (they are near-duplicates)",
+    )
+    p_manifest.add_argument(
+        "--recognizer-profile",
+        dest="recognizer_profile",
+        default=None,
+        help="Recognizer profile name from face_engine.profiles (default: active_profile)",
+    )
+    p_manifest.add_argument(
+        "--recognizer-version",
+        dest="recognizer_version",
+        default=None,
+        help="Filter calibration candidates and gallery embeddings by recognizer_version",
     )
     p_manifest.add_argument("--random-seed", dest="random_seed", type=int, default=42)
 

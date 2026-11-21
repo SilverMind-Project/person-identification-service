@@ -23,6 +23,7 @@ from pgvector.asyncpg import register_vector
 from app import config
 from app.services.enrollment_repository import EnrollmentRepository, PostgresEnrollmentRepository
 from app.services.prototype_builder import PrototypePolicy
+from app.services.recognizer_profile import get_recognizer_profile, load_active_recognizer_profile
 
 
 async def rebuild_all_prototypes(
@@ -56,12 +57,19 @@ async def _run(args: argparse.Namespace) -> int:
         print("FAIL: database.dsn is not configured (set DATABASE_URL)")
         return 1
 
+    face_cfg = config.get("face_engine", {}) or {}
+    profile = (
+        get_recognizer_profile(face_cfg, args.profile)
+        if args.profile
+        else load_active_recognizer_profile(face_cfg)
+    )
     proto_cfg = config.get("prototypes", {}) or {}
+    base_quality = str(config.get("face_quality.scorer", "heuristic-v1"))
     policy = PrototypePolicy(
         min_members_per_bin=int(proto_cfg.get("min_members_per_bin", 3)),
         max_per_bin=int(proto_cfg.get("max_per_bin", 6)),
         missing_quality_weight=float(proto_cfg.get("missing_quality_weight", 0.5)),
-        expected_quality_version=str(config.get("face_quality.scorer", "heuristic-v1")),
+        expected_quality_version=profile.scoped_quality_version(base_quality),
         min_promotion_quality=float(proto_cfg.get("min_promotion_quality", 0.5)),
         min_promotion_interocular_px=float(proto_cfg.get("min_promotion_interocular_px", 24.0)),
     )
@@ -71,7 +79,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     pool = await asyncpg.create_pool(dsn, init=_init, min_size=1, max_size=2)
     try:
-        repo = PostgresEnrollmentRepository(pool)
+        repo = PostgresEnrollmentRepository(pool, recognizer_version=profile.recognizer_version)
         backfilled, counts = await rebuild_all_prototypes(
             repo, policy=policy, person_id=args.person_id
         )
@@ -97,6 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         dest="person_id",
         default=None,
         help="Rebuild only this enrolled member (default: every enrolled member)",
+    )
+    parser.add_argument(
+        "--profile",
+        dest="profile",
+        default=None,
+        help="Recognizer profile name under face_engine.profiles (default: active_profile)",
     )
     return asyncio.run(_run(parser.parse_args(argv)))
 

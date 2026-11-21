@@ -1,10 +1,11 @@
-"""Triton-backed Buffalo_L face detection and recognition."""
+"""Triton-backed face detection and profile-configurable recognition."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import logging
+from dataclasses import replace
 from typing import Protocol, cast
 
 import cv2
@@ -15,6 +16,11 @@ from triton_shared.client import TritonClientProtocol
 from app import config
 from app.services.face_models import DetectedFace
 from app.services.face_quality import FaceQualityInputs, FaceQualityScorer
+from app.services.recognizer_profile import (
+    BUFFALO_L_PROFILE,
+    RecognizerProfile,
+    load_active_recognizer_profile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +43,7 @@ _SCRFD_OUTPUTS = [
     "477",
     "500",
 ]
-_ARCFACE_DST = np.array(
-    [
-        [38.2946, 51.6963],
-        [73.5318, 51.5014],
-        [56.0252, 71.7366],
-        [41.5493, 92.3655],
-        [70.7299, 92.2041],
-    ],
-    dtype=np.float32,
-)
+_ARCFACE_DST = BUFFALO_L_PROFILE.alignment_template_array()
 
 _CANONICAL_FACE_3D = np.array(
     [
@@ -96,11 +93,22 @@ _CANONICAL_MAP_INDICES = (
 
 
 class FaceEngine:
-    """Runs the five Buffalo_L graphs through Triton."""
+    """Runs detection, profile-selected recognition, landmarks, and attributes through Triton."""
 
-    def __init__(self, client: TritonClientProtocol, quality_scorer: FaceQualityScorer) -> None:
+    def __init__(
+        self,
+        client: TritonClientProtocol,
+        quality_scorer: FaceQualityScorer,
+        profile: RecognizerProfile | None = None,
+    ) -> None:
         self._client = client
         self._quality_scorer = quality_scorer
+        self._profile = (
+            profile
+            if profile is not None
+            else load_active_recognizer_profile(config.get("face_engine", {}) or {})
+        )
+        self._alignment_template = self._profile.alignment_template_array()
         self._det_threshold = float(config.get("face_engine.det_threshold", 0.6))
         det_size = config.get("face_engine.det_size", [640, 640])
         if det_size != [640, 640]:
@@ -114,29 +122,38 @@ class FaceEngine:
         if not self.endpoint:
             raise ValueError("face_engine.triton_url must not be empty")
 
-        self.model_names = {
-            "detector": str(config.get("face_engine.models.detector", "face-detector-scrfd")),
-            "recognition": str(
-                config.get("face_engine.models.recognition", "face-recognition-arcface")
-            ),
-            "landmark_2d": str(config.get("face_engine.models.landmark_2d", "face-landmark-2d106")),
-            "landmark_3d": str(config.get("face_engine.models.landmark_3d", "face-landmark-3d68")),
-            "genderage": str(
-                config.get("face_engine.models.genderage", "face-attribute-genderage")
-            ),
-        }
-        if any(not name.strip() for name in self.model_names.values()):
-            raise ValueError("All face_engine.models entries must be non-empty")
-        if len(set(self.model_names.values())) != len(self.model_names):
-            raise ValueError("Each face_engine.models entry must name a distinct Triton model")
+        self.model_names = self._profile.model_names
         logger.info(
-            "FaceEngine ready: backend=triton endpoint=%s profile=%s",
+            "FaceEngine ready: backend=triton endpoint=%s precision_profile=%s "
+            "recognizer_profile=%s recognizer_version=%s",
             self.endpoint,
             self.model_profile,
+            self._profile.name,
+            self._profile.recognizer_version,
         )
 
+    @property
+    def profile(self) -> RecognizerProfile:
+        return self._profile
+
+    @property
+    def recognizer_version(self) -> str:
+        return self._profile.recognizer_version
+
+    @property
+    def preprocessing_version(self) -> str:
+        return self._profile.preprocessing_version
+
+    @property
+    def licence(self) -> str:
+        return self._profile.licence
+
+    @property
+    def quality_version(self) -> str:
+        return self._profile.scoped_quality_version(self._quality_scorer.version)
+
     async def validate_models(self) -> None:
-        """Fail startup unless every configured Buffalo_L model is ready."""
+        """Fail startup unless every Triton model required by the active profile is ready."""
         readiness = await asyncio.gather(
             *(self._client.is_model_ready(name) for name in self.model_names.values())
         )
@@ -148,8 +165,33 @@ class FaceEngine:
         if missing:
             raise RuntimeError(f"Required Triton face models are not ready: {', '.join(missing)}")
 
+    async def validate_recognition_model(self) -> None:
+        """Verify that only the active profile's recognition model is ready on Triton."""
+        model = self._profile.recognition_model
+        if not await self._client.is_model_ready(model):
+            raise RuntimeError(f"Required Triton recognition model is not ready: {model}")
+
+    async def embed_aligned_crop(self, aligned_bgr: np.ndarray) -> np.ndarray:
+        """Run the active profile's recognition model on an already-aligned BGR crop."""
+        expected = self._profile.input_size_px
+        if aligned_bgr.ndim != 3 or aligned_bgr.shape[:2] != (expected, expected):
+            raise ValueError(
+                f"Expected aligned BGR crop of shape ({expected}, {expected}, 3), "
+                f"got {aligned_bgr.shape}"
+            )
+        tensor = _prepare_recognition_tensor(aligned_bgr, self._profile)
+        recognition = await self._client.infer(
+            self._profile.recognition_model,
+            [(self._profile.recognition_input_name, tensor)],
+            [self._profile.recognition_output_name],
+        )
+        return _normalize_embedding(
+            recognition[self._profile.recognition_output_name],
+            expected_dim=self._profile.embedding_dim,
+        )
+
     async def detect_faces(self, image: np.ndarray) -> list[DetectedFace]:
-        """Detect faces and run all Buffalo_L enrichment graphs."""
+        """Detect faces and run the active profile's recognition and enrichment graphs."""
         detector_input, det_scale = _prepare_scrfd(image)
         outputs = cast(
             dict[str, FloatArray],
@@ -183,15 +225,17 @@ class FaceEngine:
         keypoints: np.ndarray,
     ) -> DetectedFace:
         bbox = detection[:4]
-        arcface_input, aligned_bgr = _prepare_arcface(image, keypoints)
+        recognition_input, aligned_bgr = _prepare_recognition(
+            image, keypoints, profile=self._profile, template=self._alignment_template
+        )
         landmark_input, landmark_matrix = _prepare_bbox_crop(image, bbox, 192)
         genderage_input, _ = _prepare_bbox_crop(image, bbox, 96)
 
         recognition, landmark_2d, landmark_3d, genderage = await asyncio.gather(
             self._client.infer(
                 self.model_names["recognition"],
-                [("input.1", arcface_input)],
-                ["683"],
+                [(self._profile.recognition_input_name, recognition_input)],
+                [self._profile.recognition_output_name],
             ),
             self._client.infer(
                 self.model_names["landmark_2d"],
@@ -210,11 +254,10 @@ class FaceEngine:
             ),
         )
 
-        embedding = np.ravel(recognition["683"]).astype(np.float32, copy=True)
-        norm = float(np.linalg.norm(embedding))
-        if norm <= 0:
-            raise RuntimeError("ArcFace returned a zero-length embedding")
-        embedding = (embedding / norm).astype(np.float32, copy=False)
+        embedding = _normalize_embedding(
+            recognition[self._profile.recognition_output_name],
+            expected_dim=self._profile.embedding_dim,
+        )
 
         landmarks_2d = _decode_landmarks(landmark_2d["fc1"], 106, 2, landmark_matrix)
         landmarks_3d = _decode_landmarks(landmark_3d["fc1"], 68, 3, landmark_matrix)
@@ -235,10 +278,11 @@ class FaceEngine:
             roll_deg=roll_deg,
             gender=gender,
             age=age,
+            aligned_crop_bgr=aligned_bgr,
         )
-        # Quality is measured on the same aligned crop ArcFace embedded, so sharpness is
+        # Quality is measured on the same aligned crop the recognizer embedded, so sharpness is
         # comparable across face sizes and alignment runs once per face.
-        face.quality = self._quality_scorer.score(
+        raw_quality = self._quality_scorer.score(
             FaceQualityInputs(
                 interocular_px=face.geometry.interocular_px,
                 det_score=face.det_score,
@@ -248,12 +292,25 @@ class FaceEngine:
                 ),
             )
         )
+        face.quality = replace(raw_quality, version=self.quality_version)
         return face
 
     @staticmethod
     def compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
         """Cosine similarity between normalized embeddings."""
         return float(np.dot(emb1, emb2))
+
+
+def _normalize_embedding(raw: np.ndarray, *, expected_dim: int) -> np.ndarray:
+    embedding = np.ravel(raw).astype(np.float32, copy=True)
+    if embedding.shape != (expected_dim,):
+        raise RuntimeError(
+            f"Recognizer returned embedding with shape {embedding.shape}; expected ({expected_dim},)"
+        )
+    norm = float(np.linalg.norm(embedding))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise RuntimeError("Recognizer returned a zero-length or non-finite embedding")
+    return (embedding / norm).astype(np.float32, copy=False)
 
 
 def _prepare_scrfd(image: np.ndarray) -> tuple[np.ndarray, float]:
@@ -355,18 +412,46 @@ def _nms(detections: np.ndarray, threshold: float) -> list[int]:
     return keep
 
 
-def align_face(image: np.ndarray, keypoints: np.ndarray) -> np.ndarray:
-    """Warp a face onto the 112x112 ArcFace template from its five SCRFD keypoints (BGR out)."""
-    matrix = _similarity_transform(keypoints.astype(np.float32), _ARCFACE_DST)
-    return cv2.warpAffine(image, matrix, (112, 112), borderValue=0.0)
+def align_face(
+    image: np.ndarray,
+    keypoints: np.ndarray,
+    *,
+    template: np.ndarray | None = None,
+    output_size_px: int = 112,
+) -> np.ndarray:
+    """Warp a face onto the configured 5-point alignment template (BGR out)."""
+    dst = _ARCFACE_DST if template is None else np.asarray(template, dtype=np.float32)
+    matrix = _similarity_transform(keypoints.astype(np.float32), dst)
+    return cv2.warpAffine(image, matrix, (output_size_px, output_size_px), borderValue=0.0)
+
+
+def _prepare_recognition_tensor(aligned_bgr: np.ndarray, profile: RecognizerProfile) -> np.ndarray:
+    pixels = (
+        cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB)
+        if profile.color_space == "rgb"
+        else aligned_bgr
+    )
+    tensor = (
+        (pixels.astype(np.float32) - profile.normalization_mean) / profile.normalization_std
+    ).transpose(2, 0, 1)[None]
+    return np.ascontiguousarray(tensor)
+
+
+def _prepare_recognition(
+    image: np.ndarray,
+    keypoints: np.ndarray,
+    *,
+    profile: RecognizerProfile,
+    template: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Align a face onto the profile's template; return the model tensor and aligned BGR crop."""
+    aligned = align_face(image, keypoints, template=template, output_size_px=profile.input_size_px)
+    return _prepare_recognition_tensor(aligned, profile), aligned
 
 
 def _prepare_arcface(image: np.ndarray, keypoints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Align a face onto the ArcFace template; return the model tensor and the aligned BGR crop."""
-    aligned = align_face(image, keypoints)
-    rgb = cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB)
-    tensor = ((rgb.astype(np.float32) - 127.5) / 127.5).transpose(2, 0, 1)[None]
-    return np.ascontiguousarray(tensor), aligned
+    """Backward-compatible wrapper using the default Buffalo_L profile."""
+    return _prepare_recognition(image, keypoints, profile=BUFFALO_L_PROFILE, template=_ARCFACE_DST)
 
 
 def _prepare_bbox_crop(

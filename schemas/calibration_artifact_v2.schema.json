@@ -207,7 +207,13 @@
       "title": "Method",
       "type": "string"
     },
+    "recognizer_version": {
+      "default": "",
+      "title": "Recognizer Version",
+      "type": "string"
+    },
     "arcface_model_version": {
+      "default": "",
       "title": "Arcface Model Version",
       "type": "string"
     },
@@ -417,7 +423,6 @@
   "required": [
     "artifact_version",
     "method",
-    "arcface_model_version",
     "model_profile",
     "preprocessing_version",
     "fitted_at",
