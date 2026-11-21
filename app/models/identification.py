@@ -136,6 +136,15 @@ class CaptureContext(BaseModel):
     crop_pad_top_frac: float = Field(..., ge=0.0, le=1.0)
     crop_pad_side_frac: float = Field(..., ge=0.0, le=1.0)
     crop_jpeg_quality: int = Field(..., ge=1, le=100)
+    detection_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "The tracker's detection id for this crop. With attestation enabled, its faces are "
+            "held in memory for a while so a later wearable attestation can name them."
+        ),
+    )
 
     @field_validator("captured_at")
     @classmethod

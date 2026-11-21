@@ -218,6 +218,7 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     from pgvector.asyncpg import register_vector
 
     from app import config
+    from app.calibration.attestation_audit import summarize
     from app.calibration.manifest import (
         GalleryEmbedding,
         ManifestError,
@@ -250,7 +251,9 @@ async def _build_manifest(args: argparse.Namespace) -> int:
         server_settings={"default_transaction_read_only": "on"},
     )
     try:
-        candidates = await PostgresCalibrationCandidateRepository(pool).list_labeled()
+        candidate_repo = PostgresCalibrationCandidateRepository(pool)
+        candidates = await candidate_repo.list_labeled()
+        attested = await candidate_repo.list_attested() if args.include_attested else []
         repo = PostgresEnrollmentRepository(pool)
         embedding_records = await repo.member_embedding_records()
         gallery_revisions = await repo.get_gallery_revisions()
@@ -267,6 +270,9 @@ async def _build_manifest(args: argparse.Namespace) -> int:
         min_promotion_interocular_px=float(proto_cfg.get("min_promotion_interocular_px", 24.0)),
     )
     meta = ManifestMeta(gallery_representation=args.gallery, gallery_revisions=gallery_revisions)
+    # Attested captures join only through the builder's audit gate, which refuses below the bar.
+    attestation_audit = summarize(attested) if attested else None
+    candidates = [*candidates, *attested]
     gallery = {
         pid: [
             GalleryEmbedding(
@@ -298,6 +304,7 @@ async def _build_manifest(args: argparse.Namespace) -> int:
                 random_seed=args.random_seed,
                 gallery_representation=args.gallery,
                 prototype_policy=prototype_policy,
+                attestation_audit=attestation_audit,
             )
         else:
             records = household_records(
@@ -307,6 +314,7 @@ async def _build_manifest(args: argparse.Namespace) -> int:
                 meta=meta,
                 gallery_representation=args.gallery,
                 prototype_policy=prototype_policy,
+                attestation_audit=attestation_audit,
             )
         if args.external:
             entries, licence = load_external_listing(Path(args.external))
@@ -334,8 +342,10 @@ async def _build_manifest(args: argparse.Namespace) -> int:
     print(f"probes by identity: {meta.probes_by_identity}; open-set probes: {meta.open_set_probes}")
     print(
         f"skipped: not a face {meta.skipped_not_a_face}, identity not enrolled "
-        f"{meta.skipped_identity_not_enrolled}"
+        f"{meta.skipped_identity_not_enrolled}, audited wrong {meta.skipped_audited_wrong}"
     )
+    if meta.sensor_attested_included:
+        print(f"sensor_attested captures included: {meta.sensor_attested_included}")
     return 0
 
 
@@ -478,6 +488,15 @@ def main(argv: list[str] | None = None) -> int:
     p_manifest.add_argument("--output", required=True, help="manifest .jsonl path (private data)")
     p_manifest.add_argument("--external", default=None, help="external set JSONL (needs Triton)")
     p_manifest.add_argument("--episode-gap-s", dest="episode_gap_s", type=float, default=300.0)
+    p_manifest.add_argument(
+        "--include-attested",
+        dest="include_attested",
+        action="store_true",
+        help=(
+            "add wearable-attested (sensor_attested) captures; refused unless at least 200 are "
+            "audited with a precision lower bound of 0.99 or better"
+        ),
+    )
     p_manifest.add_argument(
         "--profile",
         choices=("single_frame", "template"),

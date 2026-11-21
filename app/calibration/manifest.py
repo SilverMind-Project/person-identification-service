@@ -37,6 +37,7 @@ from typing import Any, Literal, Protocol
 import cv2
 import numpy as np
 
+from app.calibration.attestation_audit import AuditSummary
 from app.calibration.episodes import EpisodeInput, assign_episodes, episode_label
 from app.calibration.models import GalleryRepresentation
 from app.services.calibration_candidates import CalibrationCandidate
@@ -117,6 +118,35 @@ class ManifestMeta:
     # Gallery representation whose score distribution this manifest records.
     gallery_representation: GalleryRepresentation = "centroid"
     gallery_revisions: dict[str, int] = field(default_factory=dict)
+    # Wearable-attested (sensor_attested) captures included, and the audit that admitted them.
+    sensor_attested_included: int = 0
+    skipped_audited_wrong: int = 0
+    attestation_audit: dict[str, Any] | None = None
+
+
+def _admit_attested(
+    candidates: Sequence[CalibrationCandidate],
+    attestation_audit: AuditSummary | None,
+    meta: ManifestMeta,
+) -> list[CalibrationCandidate]:
+    """Attested captures admitted to the manifest; refuses unless the audit bar is met.
+
+    The bar is checked here, in the builder, so no caller or setting can include machine labels
+    that an audit has not vouched for. Captures an auditor marked wrong or not a face never enter.
+    """
+    attested = [c for c in candidates if c.label_state == "attested"]
+    if not attested:
+        return []
+    if attestation_audit is None or not attestation_audit.meets_bar:
+        raise ManifestError(
+            "sensor_attested captures need an audit of at least 200 with a precision lower bound "
+            f"of 0.99 or better; audit summary: {attestation_audit}"
+        )
+    admitted = [c for c in attested if c.audit_verdict in (None, "correct")]
+    meta.skipped_audited_wrong += len(attested) - len(admitted)
+    meta.sensor_attested_included += len(admitted)
+    meta.attestation_audit = asdict(attestation_audit) | {"meets_bar": attestation_audit.meets_bar}
+    return admitted
 
 
 def _unit(vector: np.ndarray) -> np.ndarray:
@@ -188,12 +218,18 @@ def _household_probes(
     meta: ManifestMeta,
     gallery_representation: GalleryRepresentation = "centroid",
     prototype_policy: PrototypePolicy = PrototypePolicy(),
+    attestation_audit: AuditSummary | None = None,
 ) -> _HouseholdProbes | None:
     """Usable labeled captures, their episodes, and precomputed gallery representations."""
     meta.gallery_representation = gallery_representation
+    admitted_attested = {
+        c.candidate_id for c in _admit_attested(candidates, attestation_audit, meta)
+    }
     usable: list[CalibrationCandidate] = []
     for c in candidates:
-        if c.label_state != "labeled" or c.label_kind is None:
+        if c.label_kind is None or not (
+            c.label_state == "labeled" or c.candidate_id in admitted_attested
+        ):
             continue
         if c.label_kind == "not_a_face":
             meta.skipped_not_a_face += 1
@@ -299,6 +335,7 @@ def household_records(
     meta: ManifestMeta,
     gallery_representation: GalleryRepresentation = "centroid",
     prototype_policy: PrototypePolicy = PrototypePolicy(),
+    attestation_audit: AuditSummary | None = None,
 ) -> list[ScoreRecord]:
     """Score records for labeled household captures against every enrolled identity."""
     prepared = _household_probes(
@@ -306,6 +343,7 @@ def household_records(
         gallery,
         episode_gap_s=episode_gap_s,
         meta=meta,
+        attestation_audit=attestation_audit,
         gallery_representation=gallery_representation,
         prototype_policy=prototype_policy,
     )
@@ -407,6 +445,7 @@ def template_records(
     random_seed: int = 42,
     gallery_representation: GalleryRepresentation = "centroid",
     prototype_policy: PrototypePolicy = PrototypePolicy(),
+    attestation_audit: AuditSummary | None = None,
 ) -> list[ScoreRecord]:
     """Score records for templates drawn within labeled household episodes.
 
@@ -424,6 +463,7 @@ def template_records(
         meta=meta,
         gallery_representation=gallery_representation,
         prototype_policy=prototype_policy,
+        attestation_audit=attestation_audit,
     )
     if prepared is None:
         return []

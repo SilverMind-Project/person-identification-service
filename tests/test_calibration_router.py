@@ -198,7 +198,7 @@ def test_summary_counts_episodes_per_identity(client: TestClient) -> None:
     _label(client, 4, label_kind="not_enrolled")
 
     summary = client.get("/api/v1/calibration/summary").json()
-    assert summary["by_state"] == {"unlabeled": 0, "labeled": 5, "rejected": 0}
+    assert summary["by_state"] == {"unlabeled": 0, "labeled": 5, "rejected": 0, "attested": 0}
     assert summary["by_label_kind"] == {"member": 4, "not_enrolled": 1}
     assert summary["by_camera"] == {"cam-1": 4, "cam-2": 1}
     assert summary["by_quality_decile"] == {"3": 5}
@@ -276,3 +276,23 @@ def test_naive_capture_time_is_rejected() -> None:
     }
     response = client.post("/api/v1/identify", json={"image": _image(), "capture_context": context})
     assert response.status_code == 422
+
+
+def test_identify_passes_the_detection_id_through() -> None:
+    capture = _SpyCapture()
+    client = _identify_client(capture)
+    context = {
+        "camera_id": "cam-7",
+        "captured_at": "2026-10-21T09:00:00+00:00",
+        "crop_pad_top_frac": 0.15,
+        "crop_pad_side_frac": 0.1,
+        "crop_jpeg_quality": 95,
+        "detection_id": "det-42",
+    }
+    response = client.post("/api/v1/identify", json={"image": _image(), "capture_context": context})
+    assert response.status_code == 200
+    assert capture.contexts[0].detection_id == "det-42"
+    # Older callers send no detection id; it stays optional.
+    del context["detection_id"]
+    client.post("/api/v1/identify", json={"image": _image(), "capture_context": context})
+    assert capture.contexts[1].detection_id is None

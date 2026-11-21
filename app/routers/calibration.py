@@ -16,8 +16,19 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.calibration.attestation_audit import (
+    MIN_AUDITED,
+    MIN_PRECISION_LOWER_BOUND,
+    audit_sample,
+    summarize,
+)
 from app.calibration.episodes import EpisodeInput, assign_episodes, episode_label
 from app.models.calibration_review import (
+    AttestationRequest,
+    AttestationResponse,
+    AttestedCandidateList,
+    AuditRequest,
+    AuditSummaryResponse,
     CalibrationSummary,
     CandidateListResponse,
     CandidateView,
@@ -72,6 +83,7 @@ def _view(
         active_quality_version=active_quality_version,
         policy=policy,
         already_promoted=promoted,
+        audit_verdict=c.audit_verdict,
     )
     return CandidateView(
         candidate_id=c.candidate_id,
@@ -94,6 +106,11 @@ def _view(
         promoted=promoted,
         promotion_eligible=reason is None,
         promotion_ineligible_reason=reason,
+        attestation_association_id=c.attestation_association_id,
+        attestation_grade=c.attestation_grade,
+        audit_verdict=c.audit_verdict,
+        audited_by=c.audited_by,
+        audited_at=c.audited_at,
     )
 
 
@@ -320,4 +337,102 @@ async def calibration_summary(request: Request) -> CalibrationSummary:
         promotable_by_identity_pose={
             pid: dict(sorted(bins.items())) for pid, bins in sorted(promotable.items())
         },
+    )
+
+
+async def _views(request: Request, candidates: list[CalibrationCandidate]) -> list[CandidateView]:
+    promoted_ids = await request.app.state.enrollment_store.promoted_candidate_ids()
+    quality_version = _active_quality_version(request)
+    policy = _prototype_policy(request)
+    return [
+        _view(c, promoted_ids=promoted_ids, active_quality_version=quality_version, policy=policy)
+        for c in candidates
+    ]
+
+
+@router.post("/attestations", response_model=AttestationResponse)
+async def attest_faces(request: Request, body: AttestationRequest) -> AttestationResponse:
+    """Keep the held faces of these detections as wearable-attested captures of a member.
+
+    Side effect: each face still held in memory for a listed detection is stored (aligned crop in
+    MinIO, row in ``calibration_candidates``) in state ``attested`` with ``label_source =
+    sensor_attested``. Nothing reaches enrollment or recognition: an operator audits a sample and
+    promotes exemplars explicitly. Detection ids without a held face are counted as missed.
+    """
+    if await request.app.state.enrollment_store.get_member(body.identity_id) is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unknown_identity", "message": "identity is not enrolled"},
+        )
+    capture = request.app.state.calibration_capture
+    if not capture.attestation_enabled:
+        return AttestationResponse(moved=0, missed=len(body.detection_ids), capped=0)
+    outcome = await capture.attest(
+        association_id=body.association_id,
+        identity_id=body.identity_id,
+        grade=body.attestation_grade,
+        detection_ids=body.detection_ids,
+        now=datetime.now(UTC),
+    )
+    return AttestationResponse(moved=outcome.moved, missed=outcome.missed, capped=outcome.capped)
+
+
+@router.get("/attestations", response_model=AttestedCandidateList)
+async def list_attested(
+    request: Request,
+    identity_id: str | None = None,
+    audited: bool | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> AttestedCandidateList:
+    """Attested captures, best face quality first (the exemplar grid an operator promotes from)."""
+    rows = await request.app.state.calibration_candidates.list_attested(
+        audited=audited, identity_id=identity_id
+    )
+    rows.sort(key=lambda c: (-c.quality_score, c.captured_at))
+    return AttestedCandidateList(candidates=await _views(request, rows[:limit]))
+
+
+@router.get("/attestations/audit-sample", response_model=AttestedCandidateList)
+async def attestation_audit_sample(
+    request: Request,
+    n: int = Query(default=50, ge=1, le=200),
+    seed: int | None = None,
+) -> AttestedCandidateList:
+    """A uniform random sample of unaudited attested captures, so the auditor cannot choose."""
+    unaudited = await request.app.state.calibration_candidates.list_attested(audited=False)
+    return AttestedCandidateList(
+        candidates=await _views(request, audit_sample(unaudited, n, seed=seed))
+    )
+
+
+@router.post("/attestations/{candidate_id}/audit", response_model=CandidateView)
+async def audit_attestation(
+    request: Request, candidate_id: str, body: AuditRequest
+) -> CandidateView:
+    """Record whether an attested label is right. Changes no label, gallery, or calibration."""
+    updated = await request.app.state.calibration_candidates.audit(
+        candidate_id,
+        verdict=body.verdict,
+        audited_by=body.audited_by,
+        audited_at=datetime.now(UTC),
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="attested candidate not found")
+    return (await _views(request, [updated]))[0]
+
+
+@router.get("/attestations/audit-summary", response_model=AuditSummaryResponse)
+async def attestation_audit_summary(request: Request) -> AuditSummaryResponse:
+    """Audit counts and the precision lower bound the manifest builder's gate reads."""
+    summary = summarize(await request.app.state.calibration_candidates.list_attested())
+    return AuditSummaryResponse(
+        attested=summary.attested,
+        audited=summary.audited,
+        correct=summary.correct,
+        wrong=summary.wrong,
+        not_a_face=summary.not_a_face,
+        precision_lower_bound=summary.precision_lower_bound,
+        min_audited=MIN_AUDITED,
+        min_precision_lower_bound=MIN_PRECISION_LOWER_BOUND,
+        meets_bar=summary.meets_bar,
     )

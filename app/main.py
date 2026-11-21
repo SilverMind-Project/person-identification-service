@@ -28,6 +28,7 @@ from app.routers import (
 )
 from app.services.calibration_candidates import PostgresCalibrationCandidateRepository
 from app.services.calibration_capture import (
+    AttestationPolicy,
     CalibrationCaptureService,
     CapturePolicy,
     CaptureVersions,
@@ -92,6 +93,18 @@ def _prototype_policy(quality_version: str) -> PrototypePolicy:
         expected_quality_version=quality_version,
         min_promotion_quality=float(section.get("min_promotion_quality", 0.5)),
         min_promotion_interocular_px=float(section.get("min_promotion_interocular_px", 24.0)),
+    )
+
+
+def _attestation_policy() -> AttestationPolicy:
+    section = config.get("calibration_capture", {}) or {}
+    return AttestationPolicy(
+        enabled=bool(section.get("attestation_enabled", False)),
+        max_items=int(section.get("attestation_max_items", 2000)),
+        max_age_s=float(section.get("attestation_max_age_s", 600)),
+        min_quality=float(section.get("attestation_min_quality", 0.35)),
+        min_interocular_px=float(section.get("attestation_min_interocular_px", 24.0)),
+        per_bucket_per_day=int(section.get("attestation_per_bucket_per_day", 40)),
     )
 
 
@@ -173,6 +186,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 arcface_model_version=str(config.get("calibration.arcface_model_version", "")),
                 preprocessing_version=str(config.get("calibration.preprocessing_version", "")),
             ),
+            _attestation_policy(),
         )
         await calibration_capture.start()
         app.state.calibration_capture = calibration_capture

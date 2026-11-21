@@ -98,8 +98,14 @@ be ignored by Git. Commit only schemas, synthetic examples, loaders, and tests.
   operator deletes them.
 - **Labels.** `label_kind` is `member` (with an enrolled `label_identity_id`), `not_enrolled`
   (an open-set impostor: visitors, relatives), or `not_a_face`; `label_source` is
-  `operator_reviewed` here (`sensor_attested` is reserved for the audited wearable path). The
-  database enforces label completeness.
+  `operator_reviewed` here. The database enforces label completeness.
+- **Sensor-attested labels.** A face tracking-orchestrator attests through a wearable association
+  is stored as `label_state = 'attested'`, `label_source = 'sensor_attested'` (a machine label,
+  outside the operator queue and `list_labeled`). It may join a calibration manifest only through
+  the builder's audit gate (`app/calibration/attestation_audit.py`: at least 200 audited from a
+  uniform random sample, Wilson 95% lower bound of precision 0.99 or better; fixed in code, not
+  settings), and captures audited wrong never enter. An operator may promote one; nothing else
+  moves it toward recognition.
 - **Episodes.** A maximal run of captures with one label on one camera with gaps under
   `episode_gap_s` (300 s; `app/calibration/episodes.py`). Household data splits by episode
   (60/20/20, stratified per label, seeded); an episode carrying two labels is reported as leakage.

@@ -71,7 +71,7 @@ person-identification-service/
 │   │   ├── identification.py # POST /identify, POST /identify-batch
 │   │   ├── motion.py        # POST /detect-motion
 │   │   ├── visitors.py      # /visitors/clusters list, detail, name, dismiss, merge
-│   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete, promote; /calibration/summary
+│   │   └── calibration.py   # /calibration/candidates list, label, label-batch, reject, delete, promote; /calibration/summary; /calibration/attestations (wearable-attested faces, audit)
 │   ├── services/
 │   │   ├── face_engine.py     # Triton preprocessing, inference, and postprocessing
 │   │   ├── face_models.py     # DetectedFace, IdentifyResult dataclasses
@@ -245,6 +245,12 @@ Key settings:
 | `calibration_capture.per_bucket_per_day` | -- | `40` | Cap per (quality decile, nearest identity, camera) per UTC day |
 | `calibration_capture.unlabeled_retention_days` | -- | `30` | Unlabeled and rejected captures (and crops) purged after this |
 | `calibration_capture.queue_size` | -- | `64` | Background capture queue; a full queue drops the offer |
+| `calibration_capture.attestation_enabled` | -- | `false` | Hold faces of `/identify` calls that name a detection, in memory, for wearable attestation |
+| `calibration_capture.attestation_max_items` | -- | `2000` | Faces held at once (aligned 112x112 crops, about 38 KB each) |
+| `calibration_capture.attestation_max_age_s` | -- | `600` | A held face older than this (capture time) can no longer be attested |
+| `calibration_capture.attestation_min_quality` | -- | `0.35` | heuristic-v1 quality floor for holding a face |
+| `calibration_capture.attestation_min_interocular_px` | -- | `24.0` | Eye-distance floor for holding a face |
+| `calibration_capture.attestation_per_bucket_per_day` | -- | `40` | Attested faces stored per (quality decile, attested identity, camera) per UTC day |
 | `visitors.clustering_enabled` | -- | `true` | Persist and cluster unknown-face sightings |
 | `visitors.min_face_quality` | -- | `0.7` | Minimum face quality score for a visitor sighting (0.0 disables) |
 | `visitors.max_abs_yaw_deg` | -- | `30` | Maximum absolute head yaw for a visitor sighting (180 disables) |
@@ -387,6 +393,8 @@ An async daily task deletes clusters in any state but `named` whose `last_seen_a
 **Calibration captures are not enrollment:**
 `CalibrationCaptureService` (`app/services/calibration_capture.py`) samples faces from tracker `/identify` calls into `calibration_candidates` (migration 0003), capped per (quality decile, nearest identity or `none`, camera) per UTC day. Capture runs in a bounded background queue and never fails or slows `/identify`. A label never changes the gallery; only explicit promotion (`POST /api/v1/calibration/candidates/{candidate_id}/promote`), an operator action gated on member label, active quality scorer version, `prototypes.min_promotion_quality`, and `prototypes.min_promotion_interocular_px`, adds the embedding (`source = deployment_capture`, `source_candidate_id` recorded for leave-episode-out calibration) and increments `members.gallery_revision`. Unlabeled and rejected rows are purged after `unlabeled_retention_days` (30) with their crops.
 
+Wearable attestation (migration 0006) is a second path through the same storage. With `calibration_capture.attestation_enabled`, faces of `/identify` calls whose `capture_context` names a `detection_id` are held in memory (`AttestationCaptureBuffer`, nothing written). `POST /api/v1/calibration/attestations` from tracking-orchestrator stores the held faces of attested detections as `label_state = 'attested'` captures (`label_source = sensor_attested`, `labeled_by = wearable:<association id>`, `attestation_grade` room or trajectory). They never appear in the operator queue (`list_page` with no state lists only operator states) or in `list_labeled`. An operator audits a uniform random sample (`/attestations/audit-sample`, `/attestations/{id}/audit`); `app/calibration/attestation_audit.py` computes the Wilson 95% lower bound, and the manifest builder (`build-manifest --include-attested`) refuses attested captures unless at least 200 are audited with a bound of 0.99 or better, and drops captures audited wrong. An operator may promote an attested capture (never one audited wrong). Unaudited and audited-wrong attested captures purge on the same 30-day schedule; audited-correct ones stay. The down migration refuses while attested rows exist.
+
 **Naming and promotion are privileged:**
 The API exposes `/api/v1/visitors/clusters/{id}/name` and `/api/v1/calibration/candidates/{id}/promote`. Enrollment gains entries ONLY via explicit enroll calls, explicit operator naming of a visitor cluster, or explicit operator promotion of a labeled capture; never automatically.
 
@@ -450,7 +458,7 @@ Enroll error handling:
 
 Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` (the raw cosine match score, never a probability) and its one-release alias `raw_similarity`, nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
 
-**Side effects:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. On `/identify` only, a request with a `capture_context` (sent by tracking-orchestrator) offers its faces to `CalibrationCaptureService` (gated by `calibration_capture.enabled`), which keeps a stratified sample as calibration candidates in a background worker. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
+**Side effects:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. On `/identify` only, a request with a `capture_context` (sent by tracking-orchestrator) offers its faces to `CalibrationCaptureService` (gated by `calibration_capture.enabled`), which keeps a stratified sample as calibration candidates in a background worker, and, when the context names a `detection_id` and `calibration_capture.attestation_enabled` is on, holds them in memory for a later wearable attestation. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
 
 Batch endpoint handles per-image errors gracefully: bad frames are skipped and the response carries an empty `faces` list for them.
 
@@ -474,6 +482,11 @@ presigns the crop keys):
 | `POST` | `/api/v1/calibration/candidates/label-batch` | Label several captures `not_enrolled` or `not_a_face`, one result each; member labels are refused (one face at a time) |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/promote` | Promote a labeled member capture (meeting quality and interocular floors) into enrollment prototypes and bump `gallery_revision` |
 | `POST` | `/api/v1/calibration/candidates/{candidate_id}/reject` | Mark a capture unusable (purged with unlabeled ones) |
+| `POST` | `/api/v1/calibration/attestations` | tracking-orchestrator: store the held faces of wearable-attested detections as `attested` captures; returns moved, missed, capped |
+| `GET` | `/api/v1/calibration/attestations` | Attested captures, best quality first (`identity_id`, `audited`, `limit`) |
+| `GET` | `/api/v1/calibration/attestations/audit-sample` | Uniform random sample of unaudited attested captures (`n`, `seed`) |
+| `POST` | `/api/v1/calibration/attestations/{candidate_id}/audit` | Record an audit verdict (`correct`, `wrong`, `not_a_face`) |
+| `GET` | `/api/v1/calibration/attestations/audit-summary` | Audit counts, Wilson lower bound, and whether the bar is met |
 | `DELETE` | `/api/v1/calibration/candidates/{candidate_id}` | Delete a capture and its crop |
 | `GET` | `/api/v1/calibration/summary` | Labeling progress per identity, kind, quality decile, camera |
 
@@ -536,7 +549,7 @@ Tables added on top of the core tables:
 | --- | --- | --- |
 | `visitor_clusters` | Regular | Visitor cluster lifecycle (candidate, surfaced, named, dismissed, attributed), centroid, and review record |
 | `visitor_sightings` | Hypertable | Unknown-face sightings (crop key, embedding) per cluster |
-| `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003) |
+| `calibration_candidates` | Regular | Sampled faces for calibration: crop key, embedding, quality features, operator label (0003); wearable-attested state, grade, association, and audit (0006) |
 | `face_prototypes` | Regular | Pose-binned face prototypes (`frontal`, `left`, `right`, `down`) per member, exact search, `ON DELETE CASCADE` (0005) |
 
 List every migration with `ls migrations`.
@@ -588,7 +601,7 @@ Tests mirror functionality but live under `tests/` at the repo root (not `app/te
 | Wire contracts | Router mounted on a bare `FastAPI` app with fakes on `app.state` and FastAPI's `TestClient` (`tests/test_identification_geometry_contract.py`); a real `EnrollmentStore` runs over an in-memory gallery seeded with one centroid (`tests/gallery.py::one_member_store`) |
 | `VisitorStore` and visitor ingest | Real asyncpg pool (`tests/test_visitor_store.py`, `tests/test_identification_visitor_ingest.py`, `tests/test_visitors_router.py`) |
 
-Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_visitor_policy.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
+Test files: `test_confidence_contract_characterization.py`, `test_database_guard.py`, `test_dependencies.py`, `test_enrollment_repository_parity.py`, `test_enrollment_store.py`, `test_enrollment_store_inmemory.py`, `test_identify_characterization.py`, `test_match_policy.py`, `test_migration_runner.py`, `test_face_engine.py`, `test_face_geometry.py`, `test_face_quality.py`, `test_guest_store.py`, `test_identification_geometry_contract.py`, `test_identification_quality_contract.py`, `test_quality_breakpoints.py`, `test_identification_visitor_ingest.py`, `test_m10_calibration.py`, `test_m3_face_evidence.py`, `test_visitors_router.py`, `test_visitor_store.py`, `test_visitor_policy.py`, `test_calibration_capture_policy.py`, `test_calibration_candidates_repo.py`, `test_calibration_router.py`, `test_calibration_evaluator_v2.py`, `test_calibration_manifest.py`, `test_calibration_fit_v2.py`, `test_skip_guard.py`, `tests/test_wearable_attestation.py`, `tests/test_attested_label_migration.py`; calibration fixtures under `tests/fixtures/identity_integrity/`. `tests/conftest.py` loads `tests/skip_guard.py`, which fails the run on any skipped test when `PID_REQUIRE_FULL_SUITE=1` (set in CI).
 
 ### Fixtures
 

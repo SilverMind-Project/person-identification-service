@@ -90,3 +90,10 @@ gallery_representation_shadow_total = Counter(
 )
 for _outcome in GALLERY_SHADOW_OUTCOMES:
     gallery_representation_shadow_total.labels(outcome=_outcome)
+
+attestation_faces_total = Counter(
+    "pid_attestation_faces_total",
+    "Faces in the wearable attestation path, by outcome: held, skipped_quality, skipped_small, "
+    "skipped_unscored, skipped_multiple_faces, evicted, moved, missed, capped, failed.",
+    ["result"],
+)

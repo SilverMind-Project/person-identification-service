@@ -164,6 +164,7 @@ def _capture_context(context: CaptureContext | None) -> CalibrationCaptureContex
         crop_pad_top_frac=context.crop_pad_top_frac,
         crop_pad_side_frac=context.crop_pad_side_frac,
         crop_jpeg_quality=context.crop_jpeg_quality,
+        detection_id=context.detection_id,
     )
 
 

@@ -24,7 +24,7 @@ class CandidateView(BaseModel):
     nearest_similarity: float = Field(
         ..., description="Raw cosine similarity to the nearest member"
     )
-    label_state: Literal["unlabeled", "labeled", "rejected"]
+    label_state: Literal["unlabeled", "labeled", "rejected", "attested"]
     label_kind: Literal["member", "not_enrolled", "not_a_face"] | None = None
     label_identity_id: str | None = None
     labeled_by: str | None = None
@@ -33,6 +33,12 @@ class CandidateView(BaseModel):
     promoted: bool = False
     promotion_eligible: bool = False
     promotion_ineligible_reason: str | None = None
+    # Wearable attestation provenance and audit; set only on attested captures.
+    attestation_association_id: str | None = None
+    attestation_grade: Literal["room", "trajectory"] | None = None
+    audit_verdict: Literal["correct", "wrong", "not_a_face"] | None = None
+    audited_by: str | None = None
+    audited_at: datetime | None = None
 
 
 class PromoteCandidateRequest(BaseModel):
@@ -121,4 +127,49 @@ class CalibrationSummary(BaseModel):
             "Count of labeled member captures per identity and pose bin that meet promotion "
             "quality and interocular distance floors"
         ),
+    )
+
+
+class AttestationRequest(BaseModel):
+    """tracking-orchestrator: a wearable association placed this member on these detections."""
+
+    model_config = {"extra": "forbid"}
+
+    association_id: str = Field(..., min_length=1, max_length=64)
+    identity_id: str = Field(..., min_length=1, max_length=64)
+    attestation_grade: Literal["room", "trajectory"]
+    detection_ids: list[str] = Field(..., min_length=1, max_length=256)
+    attested_by: Literal["wearable"]
+
+
+class AttestationResponse(BaseModel):
+    moved: int = Field(..., ge=0, description="Held faces stored as attested captures")
+    missed: int = Field(..., ge=0, description="Detection ids with no held face (not an error)")
+    capped: int = Field(..., ge=0, description="Held faces dropped by the daily per-bucket cap")
+
+
+class AttestedCandidateList(BaseModel):
+    candidates: list[CandidateView]
+
+
+class AuditRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    verdict: Literal["correct", "wrong", "not_a_face"]
+    audited_by: str = Field(..., min_length=1, max_length=128)
+
+
+class AuditSummaryResponse(BaseModel):
+    attested: int = Field(..., ge=0)
+    audited: int = Field(..., ge=0)
+    correct: int = Field(..., ge=0)
+    wrong: int = Field(..., ge=0)
+    not_a_face: int = Field(..., ge=0)
+    precision_lower_bound: float | None = Field(
+        ..., description="Wilson 95% lower bound of correct / audited; null before any audit"
+    )
+    min_audited: int
+    min_precision_lower_bound: float
+    meets_bar: bool = Field(
+        ..., description="Attested labels may join a calibration manifest (build-manifest)"
     )

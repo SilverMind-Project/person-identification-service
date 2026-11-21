@@ -7,6 +7,14 @@ worker, so ``/identify`` never waits on, or fails because of, a capture.
 
 Captures happen only when ``calibration_capture.enabled`` is on and the request carries a capture
 context (tracking-orchestrator sends one; other callers do not).
+
+Wearable attestation is a second, independent path through the same storage. With
+``calibration_capture.attestation_enabled``, every scored face of an identify call whose capture
+context names a detection is held briefly in memory (``AttestationCaptureBuffer``; nothing is
+written). When tracking-orchestrator later reports that a wearable association placed a household
+member on that detection, :meth:`CalibrationCaptureService.attest` stores the held faces as
+``attested`` candidates labeled ``sensor_attested`` for that member. They are machine labels: an
+operator audits a random sample, and only an operator promotes one into recognition.
 """
 
 from __future__ import annotations
@@ -15,17 +23,19 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Protocol
 
 import cv2
 import numpy as np
 
-from app.observability.metrics import calibration_captures_total
+from app.observability.metrics import attestation_faces_total, calibration_captures_total
 from app.services.calibration_candidates import (
     NO_NEAREST,
+    AttestationGrade,
     BucketKey,
     CalibrationCandidate,
     CalibrationCandidateRepository,
@@ -61,6 +71,33 @@ class CaptureContext:
     crop_pad_top_frac: float
     crop_pad_side_frac: float
     crop_jpeg_quality: int
+    # The tracker's detection id for this crop; a face can be attested only through it.
+    detection_id: str | None = None
+
+
+@dataclass(frozen=True)
+class AttestationPolicy:
+    """The in-memory hold for wearable attestation and its admission floors."""
+
+    enabled: bool = False
+    # Faces held at once; the oldest goes first when full.
+    max_items: int = 2000
+    # A held face older than this (seconds, capture time) can no longer be attested.
+    max_age_s: float = 600.0
+    # heuristic-v1 face quality floor; faces without a score are never held.
+    min_quality: float = 0.35
+    # Faces smaller than this between the eyes are not usable exemplars or calibration probes.
+    min_interocular_px: float = 24.0
+    # Attested faces stored per (quality decile, attested identity, camera) per UTC day, so a
+    # resident wearing a tag all day cannot swamp the set.
+    per_bucket_per_day: int = 40
+
+
+@dataclass(frozen=True)
+class AttestationOutcome:
+    moved: int
+    missed: int
+    capped: int
 
 
 @dataclass(frozen=True)
@@ -114,6 +151,62 @@ class _Pending:
     context: CaptureContext
 
 
+@dataclass(frozen=True)
+class _Held:
+    aligned: np.ndarray
+    face: DetectedFace
+    identity: IdentifyResult
+    context: CaptureContext
+
+
+def attestation_hold_rejection(face: DetectedFace, policy: AttestationPolicy) -> str | None:
+    """None when the face may be held for attestation, else the reason (a metric label)."""
+    if face.quality is None or face.keypoints_5_px is None:
+        return "skipped_unscored"
+    if face.quality.score < policy.min_quality:
+        return "skipped_quality"
+    interocular = face.geometry.interocular_px
+    if interocular is None or interocular < policy.min_interocular_px:
+        return "skipped_small"
+    return None
+
+
+class AttestationCaptureBuffer:
+    """Aligned faces keyed by detection id, bounded by count and capture-time age.
+
+    Biometric data held only in memory; it is written nowhere unless a face is attested.
+    """
+
+    def __init__(self, policy: AttestationPolicy) -> None:
+        self._policy = policy
+        self._items: OrderedDict[str, _Held] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def hold(self, detection_id: str, held: _Held) -> None:
+        self._items.pop(detection_id, None)
+        self._items[detection_id] = held
+        while len(self._items) > self._policy.max_items:
+            self._items.popitem(last=False)
+            attestation_faces_total.labels(result="evicted").inc()
+
+    def take(self, detection_id: str, *, now: datetime) -> _Held | None:
+        held = self._items.pop(detection_id, None)
+        if held is None:
+            return None
+        if now - held.context.captured_at > timedelta(seconds=self._policy.max_age_s):
+            return None
+        return held
+
+    def expire(self, now: datetime) -> int:
+        cutoff = now - timedelta(seconds=self._policy.max_age_s)
+        stale = [k for k, h in self._items.items() if h.context.captured_at < cutoff]
+        for key in stale:
+            del self._items[key]
+        return len(stale)
+
+
 class CalibrationCaptureService:
     def __init__(
         self,
@@ -121,11 +214,15 @@ class CalibrationCaptureService:
         crops: CropStore,
         policy: CapturePolicy,
         versions: CaptureVersions,
+        attestation: AttestationPolicy = AttestationPolicy(),
     ) -> None:
         self._repository = repository
         self._crops = crops
         self._policy = policy
         self._versions = versions
+        self._attestation = attestation
+        self._held = AttestationCaptureBuffer(attestation)
+        self._attested_counter = DailyBucketCounter()
         self._counter = DailyBucketCounter()
         self._queue: asyncio.Queue[_Pending] = asyncio.Queue(maxsize=policy.queue_size)
         self._worker: asyncio.Task[None] | None = None
@@ -134,12 +231,24 @@ class CalibrationCaptureService:
     def enabled(self) -> bool:
         return self._policy.enabled
 
+    @property
+    def attestation_enabled(self) -> bool:
+        return self._attestation.enabled
+
+    @property
+    def held_for_attestation(self) -> int:
+        return len(self._held)
+
     async def start(self) -> None:
         """Seed today's caps from stored captures and start the upload worker."""
-        if not self._policy.enabled:
-            return
         today = datetime.now(UTC).date()
         start_of_day = datetime.combine(today, time.min, tzinfo=UTC)
+        if self._attestation.enabled:
+            self._attested_counter.seed(
+                today, await self._repository.bucket_counts(start_of_day, attested_only=True)
+            )
+        if not self._policy.enabled:
+            return
         self._counter.seed(today, await self._repository.bucket_counts(start_of_day))
         self._worker = asyncio.create_task(self._run())
 
@@ -157,8 +266,16 @@ class CalibrationCaptureService:
         identities: Sequence[IdentifyResult],
         context: CaptureContext | None,
     ) -> int:
-        """Queue the faces of one identify call that the policy keeps; returns how many."""
-        if not self._policy.enabled or context is None:
+        """Queue the faces of one identify call that the policy keeps; returns how many.
+
+        Independently, with attestation enabled and a detection id in the context, every face
+        that clears the attestation floors is held in memory for a later attestation.
+        """
+        if context is None:
+            return 0
+        if self._attestation.enabled and context.detection_id:
+            self._hold_for_attestation(image, faces, identities, context)
+        if not self._policy.enabled:
             return 0
         queued = 0
         for face, identity in zip(faces, identities, strict=True):
@@ -186,6 +303,84 @@ class CalibrationCaptureService:
                 calibration_captures_total.labels(result=reason).inc()
         return queued
 
+    def _hold_for_attestation(
+        self,
+        image: np.ndarray,
+        faces: Sequence[DetectedFace],
+        identities: Sequence[IdentifyResult],
+        context: CaptureContext,
+    ) -> None:
+        assert context.detection_id is not None
+        # The tracker attests a detection because it attributed one face in the person crop to
+        # that person; it does not say which face. With two faces in the crop the held face
+        # could be a neighbour's, so such a crop holds nothing and its attestation is a miss.
+        if len(faces) > 1:
+            attestation_faces_total.labels(result="skipped_multiple_faces").inc(len(faces))
+            self._held.expire(context.captured_at)
+            return
+        for face, identity in zip(faces, identities, strict=True):
+            reason = attestation_hold_rejection(face, self._attestation)
+            if reason is not None:
+                attestation_faces_total.labels(result=reason).inc()
+                continue
+            assert face.keypoints_5_px is not None  # checked by attestation_hold_rejection
+            self._held.hold(
+                context.detection_id,
+                _Held(align_face(image, face.keypoints_5_px), face, identity, context),
+            )
+            attestation_faces_total.labels(result="held").inc()
+        self._held.expire(context.captured_at)
+
+    async def attest(
+        self,
+        *,
+        association_id: str,
+        identity_id: str,
+        grade: AttestationGrade,
+        detection_ids: Sequence[str],
+        now: datetime,
+    ) -> AttestationOutcome:
+        """Store the held faces of these detections as attested candidates of *identity_id*.
+
+        Goes through the same crop store and repository as operator captures. A detection whose
+        face is no longer held (expired, never held, already attested) is a miss, not an error.
+        """
+        moved = missed = capped = 0
+        for detection_id in dict.fromkeys(detection_ids):
+            held = self._held.take(detection_id, now=now)
+            if held is None:
+                missed += 1
+                continue
+            assert held.face.quality is not None
+            bucket = (quality_decile(held.face.quality.score), identity_id, held.context.camera_id)
+            if not self._attested_counter.try_take(
+                bucket, held.context.captured_at, self._attestation.per_bucket_per_day
+            ):
+                capped += 1
+                continue
+            candidate = replace(
+                self._candidate(held.face, held.identity, held.context),
+                label_state="attested",
+                label_kind="member",
+                label_identity_id=identity_id,
+                label_source="sensor_attested",
+                labeled_by=f"wearable:{association_id}",
+                labeled_at=now,
+                attestation_association_id=association_id,
+                attestation_grade=grade,
+            )
+            try:
+                await self._write(candidate, held.aligned, prefix="attested")
+            except Exception:
+                logger.exception("attestation_store_failed")
+                attestation_faces_total.labels(result="failed").inc()
+                continue
+            moved += 1
+        attestation_faces_total.labels(result="moved").inc(moved)
+        attestation_faces_total.labels(result="missed").inc(missed)
+        attestation_faces_total.labels(result="capped").inc(capped)
+        return AttestationOutcome(moved=moved, missed=missed, capped=capped)
+
     async def drain(self) -> None:
         """Wait until every queued capture is stored or has failed (tests and shutdown)."""
         await self._queue.join()
@@ -205,24 +400,44 @@ class CalibrationCaptureService:
                 self._queue.task_done()
 
     async def _store(self, pending: _Pending) -> None:
-        face, identity, context = pending.face, pending.identity, pending.context
-        # Both are guaranteed by should_capture before a face is queued.
-        assert face.quality is not None
+        face = pending.face
+        # Guaranteed by should_capture before a face is queued.
         assert face.keypoints_5_px is not None
-        candidate_id = str(uuid.uuid4())
-        key = f"{CROP_PREFIX}/{context.captured_at.astimezone(UTC):%Y-%m-%d}/{candidate_id}.png"
         aligned = align_face(pending.image, face.keypoints_5_px)
+        await self._write(
+            self._candidate(face, pending.identity, pending.context), aligned, prefix=""
+        )
+
+    async def _write(
+        self, candidate: CalibrationCandidate, aligned: np.ndarray, *, prefix: str
+    ) -> None:
+        """Upload the aligned crop, then insert the row; never leaves an orphan crop."""
+        day = f"{candidate.captured_at.astimezone(UTC):%Y-%m-%d}"
+        folder = f"{CROP_PREFIX}/{prefix}" if prefix else CROP_PREFIX
+        key = f"{folder}/{day}/{candidate.candidate_id}.png"
         ok, png = cv2.imencode(".png", aligned)
         if not ok:
             raise RuntimeError("could not encode aligned crop")
         await self._crops.put_png(key, png.tobytes())
+        try:
+            await self._repository.insert(replace(candidate, crop_object_key=key))
+        except Exception:
+            # Never leave an orphan crop for a row that does not exist.
+            await self._crops.delete([key])
+            raise
+
+    def _candidate(
+        self, face: DetectedFace, identity: IdentifyResult, context: CaptureContext
+    ) -> CalibrationCandidate:
+        """The candidate row for one face; ``_write`` fills in the crop key it uploads to."""
+        assert face.quality is not None
         quality = face.quality
-        candidate = CalibrationCandidate(
-            candidate_id=candidate_id,
+        return CalibrationCandidate(
+            candidate_id=str(uuid.uuid4()),
             captured_at=context.captured_at,
             camera_id=context.camera_id,
             source="cts_identify",
-            crop_object_key=key,
+            crop_object_key="",
             embedding=np.asarray(face.embedding, dtype=np.float32),
             arcface_model_version=self._versions.arcface_model_version,
             preprocessing_version=self._versions.preprocessing_version,
@@ -245,12 +460,6 @@ class CalibrationCaptureService:
             nearest_person_id=identity.best_candidate_id,
             nearest_similarity=identity.similarity,
         )
-        try:
-            await self._repository.insert(candidate)
-        except Exception:
-            # Never leave an orphan crop for a row that does not exist.
-            await self._crops.delete([key])
-            raise
 
     async def purge_expired(self, now: datetime) -> int:
         """Delete unlabeled and rejected captures past retention, with their crops."""

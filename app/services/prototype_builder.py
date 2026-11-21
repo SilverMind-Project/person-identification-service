@@ -245,10 +245,17 @@ def promotion_ineligibility(
     active_quality_version: str,
     policy: PrototypePolicy,
     already_promoted: bool = False,
+    audit_verdict: str | None = None,
 ) -> str | None:
-    """Return a bounded reason code when a capture cannot be promoted, or None when eligible."""
-    if label_state != "labeled":
+    """Return a bounded reason code when a capture cannot be promoted, or None when eligible.
+
+    An operator-labeled capture and a wearable-attested one are both promotable: promotion is
+    itself the operator's decision. An attested capture an auditor marked wrong never is.
+    """
+    if label_state not in ("labeled", "attested"):
         return "not_labeled"
+    if audit_verdict in ("wrong", "not_a_face"):
+        return "audited_wrong"
     if label_kind != "member" or not label_identity_id:
         return "not_member_label"
     if already_promoted:

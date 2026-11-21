@@ -16,7 +16,12 @@ from typing import Any, Literal, Protocol
 import asyncpg
 import numpy as np
 
-LabelState = Literal["unlabeled", "labeled", "rejected"]
+LabelState = Literal["unlabeled", "labeled", "rejected", "attested"]
+# The states an operator labels in the review queue; "attested" rows are machine labels from a
+# wearable association and have their own audit queue.
+OPERATOR_QUEUE_STATES: tuple[LabelState, ...] = ("unlabeled", "labeled", "rejected")
+AttestationGrade = Literal["room", "trajectory"]
+AuditVerdict = Literal["correct", "wrong", "not_a_face"]
 LabelKind = Literal["member", "not_enrolled", "not_a_face"]
 LabelSource = Literal[
     "operator_reviewed", "enrollment_capture", "external_benchmark", "sensor_attested"
@@ -62,6 +67,12 @@ class CalibrationCandidate:
     label_source: LabelSource | None = None
     labeled_by: str | None = None
     labeled_at: datetime | None = None
+    # Wearable attestation provenance (state "attested" only) and the operator's audit of it.
+    attestation_association_id: str | None = None
+    attestation_grade: AttestationGrade | None = None
+    audit_verdict: AuditVerdict | None = None
+    audited_by: str | None = None
+    audited_at: datetime | None = None
 
     @property
     def bucket(self) -> BucketKey:
@@ -87,7 +98,8 @@ class CalibrationCandidateRepository(Protocol):
     async def list_page(
         self, *, state: LabelState | None, limit: int, cursor: str | None
     ) -> CandidatePage:
-        """Candidates newest first (``captured_at``, then id), optionally in one state."""
+        """Candidates newest first (``captured_at``, then id), in one state or, when *state* is
+        None, in any of the operator queue's states (never ``attested``)."""
         ...
 
     async def label(
@@ -116,11 +128,32 @@ class CalibrationCandidateRepository(Protocol):
         ...
 
     async def purge(self, captured_before: datetime) -> list[str]:
-        """Delete unlabeled and rejected candidates captured before the cutoff; returns crop keys."""
+        """Delete unlabeled, rejected, and attested-but-not-audited-correct candidates captured
+        before the cutoff; returns crop keys. Operator labels and audited-correct attestations
+        stay."""
         ...
 
-    async def bucket_counts(self, captured_since: datetime) -> dict[BucketKey, int]:
+    async def bucket_counts(
+        self, captured_since: datetime, *, attested_only: bool = False
+    ) -> dict[BucketKey, int]:
         """Captures per sampling bucket since a time (seeds the in-memory daily caps)."""
+        ...
+
+    async def list_attested(
+        self, *, audited: bool | None = None, identity_id: str | None = None
+    ) -> list[CalibrationCandidate]:
+        """Attested candidates oldest first; *audited* None for all, else only (un)audited."""
+        ...
+
+    async def audit(
+        self,
+        candidate_id: str,
+        *,
+        verdict: AuditVerdict,
+        audited_by: str,
+        audited_at: datetime,
+    ) -> CalibrationCandidate | None:
+        """Record an audit verdict on an attested candidate; None when no attested row has that id."""
         ...
 
     async def list_labeled(self) -> list[CalibrationCandidate]:
@@ -128,6 +161,10 @@ class CalibrationCandidateRepository(Protocol):
         ...
 
     async def count_by_state(self) -> dict[LabelState, int]: ...
+
+
+def _zero_counts() -> dict[LabelState, int]:
+    return {"unlabeled": 0, "labeled": 0, "rejected": 0, "attested": 0}
 
 
 def _encode_cursor(candidate: CalibrationCandidate) -> str:
@@ -150,11 +187,12 @@ _COLUMNS = """candidate_id, captured_at, camera_id, source, crop_object_key, emb
     arcface_model_version, preprocessing_version, quality_version, quality_score,
     quality_components, capture_profile, interocular_px, yaw_deg, pitch_deg, nearest_person_id,
     nearest_similarity, label_state, label_identity_id, label_kind, label_source, labeled_by,
-    labeled_at"""
+    labeled_at, attestation_association_id, attestation_grade, audit_verdict, audited_by,
+    audited_at"""
 
 _SQL_INSERT = f"""INSERT INTO calibration_candidates ({_COLUMNS})
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15,
-        $16, $17, $18, $19, $20, $21, $22, $23)"""
+        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)"""
 
 _SQL_SELECT = f"SELECT {_COLUMNS} FROM calibration_candidates"
 
@@ -202,6 +240,11 @@ def _from_row(row: asyncpg.Record) -> CalibrationCandidate:
         label_source=row["label_source"],
         labeled_by=row["labeled_by"],
         labeled_at=row["labeled_at"],
+        attestation_association_id=row["attestation_association_id"],
+        attestation_grade=row["attestation_grade"],
+        audit_verdict=row["audit_verdict"],
+        audited_by=row["audited_by"],
+        audited_at=row["audited_at"],
     )
 
 
@@ -239,6 +282,11 @@ class PostgresCalibrationCandidateRepository:
                 c.label_source,
                 c.labeled_by,
                 c.labeled_at,
+                c.attestation_association_id,
+                c.attestation_grade,
+                c.audit_verdict,
+                c.audited_by,
+                c.audited_at,
             )
 
     async def get(self, candidate_id: str) -> CalibrationCandidate | None:
@@ -253,7 +301,7 @@ class PostgresCalibrationCandidateRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""{_SQL_SELECT}
-                WHERE ($1::text IS NULL OR label_state = $1)
+                WHERE (($1::text IS NULL AND label_state <> 'attested') OR label_state = $1)
                   AND ($2::timestamptz IS NULL OR (captured_at, candidate_id) < ($2, $3::uuid))
                 ORDER BY captured_at DESC, candidate_id DESC
                 LIMIT $4""",
@@ -311,23 +359,29 @@ class PostgresCalibrationCandidateRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """DELETE FROM calibration_candidates
-                   WHERE label_state IN ('unlabeled', 'rejected') AND captured_at < $1
+                   WHERE (label_state IN ('unlabeled', 'rejected')
+                          OR (label_state = 'attested'
+                              AND audit_verdict IS DISTINCT FROM 'correct'))
+                     AND captured_at < $1
                    RETURNING crop_object_key""",
                 captured_before,
             )
         return sorted(str(r["crop_object_key"]) for r in rows)
 
-    async def bucket_counts(self, captured_since: datetime) -> dict[BucketKey, int]:
+    async def bucket_counts(
+        self, captured_since: datetime, *, attested_only: bool = False
+    ) -> dict[BucketKey, int]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """SELECT LEAST(floor(quality_score * 10)::int, 9) AS decile,
                           COALESCE(nearest_person_id, $2) AS nearest,
                           camera_id, count(*)::int AS n
                    FROM calibration_candidates
-                   WHERE captured_at >= $1
+                   WHERE captured_at >= $1 AND (NOT $3 OR label_state = 'attested')
                    GROUP BY 1, 2, 3""",
                 captured_since,
                 NO_NEAREST,
+                attested_only,
             )
         return {(r["decile"], r["nearest"], r["camera_id"]): r["n"] for r in rows}
 
@@ -343,9 +397,45 @@ class PostgresCalibrationCandidateRepository:
             rows = await conn.fetch(
                 "SELECT label_state, count(*)::int AS n FROM calibration_candidates GROUP BY 1"
             )
-        counts: dict[LabelState, int] = {"unlabeled": 0, "labeled": 0, "rejected": 0}
+        counts = _zero_counts()
         counts.update({r["label_state"]: r["n"] for r in rows})
         return counts
+
+    async def list_attested(
+        self, *, audited: bool | None = None, identity_id: str | None = None
+    ) -> list[CalibrationCandidate]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""{_SQL_SELECT}
+                WHERE label_state = 'attested'
+                  AND ($1::boolean IS NULL OR (audit_verdict IS NOT NULL) = $1)
+                  AND ($2::text IS NULL OR label_identity_id = $2)
+                ORDER BY captured_at, candidate_id""",
+                audited,
+                identity_id,
+            )
+        return [_from_row(r) for r in rows]
+
+    async def audit(
+        self,
+        candidate_id: str,
+        *,
+        verdict: AuditVerdict,
+        audited_by: str,
+        audited_at: datetime,
+    ) -> CalibrationCandidate | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""UPDATE calibration_candidates
+                SET audit_verdict = $2, audited_by = $3, audited_at = $4
+                WHERE candidate_id = $1::uuid AND label_state = 'attested'
+                RETURNING {_COLUMNS}""",
+                candidate_id,
+                verdict,
+                audited_by,
+                audited_at,
+            )
+        return _from_row(row) if row else None
 
 
 class InMemoryCalibrationCandidateRepository:
@@ -366,7 +456,11 @@ class InMemoryCalibrationCandidateRepository:
         self, *, state: LabelState | None, limit: int, cursor: str | None
     ) -> CandidatePage:
         rows = sorted(
-            (c for c in self._rows.values() if state is None or c.label_state == state),
+            (
+                c
+                for c in self._rows.values()
+                if (state is None and c.label_state != "attested") or c.label_state == state
+            ),
             key=_sort_key,
             reverse=True,
         )
@@ -437,16 +531,24 @@ class InMemoryCalibrationCandidateRepository:
         expired = [
             c
             for c in self._rows.values()
-            if c.label_state in ("unlabeled", "rejected") and c.captured_at < captured_before
+            if c.captured_at < captured_before
+            and (
+                c.label_state in ("unlabeled", "rejected")
+                or (c.label_state == "attested" and c.audit_verdict != "correct")
+            )
         ]
         for c in expired:
             del self._rows[c.candidate_id]
         return sorted(c.crop_object_key for c in expired)
 
-    async def bucket_counts(self, captured_since: datetime) -> dict[BucketKey, int]:
+    async def bucket_counts(
+        self, captured_since: datetime, *, attested_only: bool = False
+    ) -> dict[BucketKey, int]:
         counts: dict[BucketKey, int] = {}
         for c in self._rows.values():
-            if c.captured_at >= captured_since:
+            if c.captured_at >= captured_since and (
+                not attested_only or c.label_state == "attested"
+            ):
                 counts[c.bucket] = counts.get(c.bucket, 0) + 1
         return counts
 
@@ -454,7 +556,38 @@ class InMemoryCalibrationCandidateRepository:
         return sorted((c for c in self._rows.values() if c.label_state == "labeled"), key=_sort_key)
 
     async def count_by_state(self) -> dict[LabelState, int]:
-        counts: dict[LabelState, int] = {"unlabeled": 0, "labeled": 0, "rejected": 0}
+        counts = _zero_counts()
         for c in self._rows.values():
             counts[c.label_state] += 1
         return counts
+
+    async def list_attested(
+        self, *, audited: bool | None = None, identity_id: str | None = None
+    ) -> list[CalibrationCandidate]:
+        return sorted(
+            (
+                c
+                for c in self._rows.values()
+                if c.label_state == "attested"
+                and (audited is None or (c.audit_verdict is not None) == audited)
+                and (identity_id is None or c.label_identity_id == identity_id)
+            ),
+            key=_sort_key,
+        )
+
+    async def audit(
+        self,
+        candidate_id: str,
+        *,
+        verdict: AuditVerdict,
+        audited_by: str,
+        audited_at: datetime,
+    ) -> CalibrationCandidate | None:
+        current = self._rows.get(candidate_id)
+        if current is None or current.label_state != "attested":
+            return None
+        updated = replace(
+            current, audit_verdict=verdict, audited_by=audited_by, audited_at=audited_at
+        )
+        self._rows[candidate_id] = updated
+        return updated

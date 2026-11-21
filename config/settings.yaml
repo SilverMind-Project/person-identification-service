@@ -168,6 +168,21 @@ calibration_capture:
   per_bucket_per_day: 40
   unlabeled_retention_days: 30
   queue_size: 64
+  # Wearable attestation: hold the faces of identify calls that name a detection, in memory
+  # only, so tracking-orchestrator can later attest them (POST /api/v1/calibration/attestations)
+  # when a wearable placed a member on that detection. Attested faces are stored as machine
+  # labels for operator audit; they never reach enrollment or recognition on their own.
+  attestation_enabled: false
+  # Faces held at once (about 38 KB each: aligned 112x112 crops), and for how long (seconds of
+  # capture time). The tracker sends attestations at most every 10 s, so 600 s is ample.
+  attestation_max_items: 2000
+  attestation_max_age_s: 600
+  # heuristic-v1 quality floor (0-1) and interocular floor (px): faces below 24 px between the
+  # eyes are neither usable exemplars nor good calibration probes.
+  attestation_min_quality: 0.35
+  attestation_min_interocular_px: 24.0
+  # Attested faces stored per (quality decile, attested identity, camera) per UTC day.
+  attestation_per_bucket_per_day: 40
 
 # Visitor clustering (identity-continuity M06)
 # Persists unmatched face embeddings, clusters them across visits, and lets a

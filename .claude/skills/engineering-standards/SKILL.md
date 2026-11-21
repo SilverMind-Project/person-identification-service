@@ -94,7 +94,9 @@ Rules:
 - Side effects are explicit. `/identify` currently writes visitor sightings for unknown faces on
   every call (`_ingest_unknown_faces` in `app/routers/identification.py`) and, with
   `calibration_capture.enabled` and a `capture_context`, queues sampled faces as calibration
-  candidates (crop in MinIO under `calibration/`, row in `calibration_candidates`); any new endpoint that
+  candidates (crop in MinIO under `calibration/`, row in `calibration_candidates`); with
+  `calibration_capture.attestation_enabled` it also holds faces naming a `detection_id` in memory
+  for `POST /api/v1/calibration/attestations`, which writes `attested` captures; any new endpoint that
   writes must say so in its docstring and OpenAPI description, and read-only measurement tools
   must call `FaceEngine` directly instead of `/identify`.
 

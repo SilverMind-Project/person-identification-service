@@ -160,7 +160,7 @@ async def test_in_memory_repository_matches_postgres(pool: asyncpg.Pool) -> None
     assert in_memory == postgres
     # Purge removes the old unlabeled and rejected rows (indexes 2 and 3) and keeps labeled ones.
     assert postgres["purged"] == ["calibration/2026-10-21/2.png", "calibration/2026-10-21/3.png"]
-    assert postgres["after_purge"] == {"unlabeled": 3, "labeled": 2, "rejected": 0}
+    assert postgres["after_purge"] == {"unlabeled": 3, "labeled": 2, "rejected": 0, "attested": 0}
 
 
 async def test_database_rejects_an_incomplete_label(pool: asyncpg.Pool) -> None:
@@ -208,3 +208,90 @@ async def test_delete_for_person_matches_between_in_memory_and_postgres(pool: as
     assert mem_result == pg_result
     assert pg_result[0] == ["calibration/2026-10-21/10.png", "calibration/2026-10-21/11.png"]
     assert pg_result[1] == [_candidate(12).candidate_id]
+
+
+def _attested(index: int, **changes: Any) -> CalibrationCandidate:
+    fields: dict[str, Any] = {
+        "label_state": "attested",
+        "label_kind": "member",
+        "label_identity_id": "resident-alpha",
+        "label_source": "sensor_attested",
+        "labeled_by": "wearable:seg-1",
+        "labeled_at": _T + timedelta(hours=1),
+        "attestation_association_id": "seg-1",
+        "attestation_grade": "trajectory",
+    }
+    return _candidate(index, **(fields | changes))
+
+
+async def _exercise_attested(repo: CalibrationCandidateRepository) -> dict[str, Any]:
+    await repo.insert(_candidate(0))
+    for index in range(1, 5):
+        await repo.insert(_attested(index))
+    audited_at = _T + timedelta(days=1)
+    out: dict[str, Any] = {}
+    out["audit_correct"] = _plain(
+        await repo.audit(  # type: ignore[arg-type]
+            _attested(1).candidate_id, verdict="correct", audited_by="op", audited_at=audited_at
+        )
+    )
+    await repo.audit(
+        _attested(2).candidate_id, verdict="wrong", audited_by="op", audited_at=audited_at
+    )
+    # Only attested rows take an audit verdict.
+    out["audit_unlabeled"] = await repo.audit(
+        _candidate(0).candidate_id, verdict="correct", audited_by="op", audited_at=audited_at
+    )
+    out["queue"] = [
+        c.candidate_id for c in (await repo.list_page(state=None, limit=10, cursor=None)).candidates
+    ]
+    out["attested_page"] = [
+        c.candidate_id
+        for c in (await repo.list_page(state="attested", limit=10, cursor=None)).candidates
+    ]
+    out["all"] = [c.candidate_id for c in await repo.list_attested()]
+    out["audited"] = [c.candidate_id for c in await repo.list_attested(audited=True)]
+    out["unaudited"] = [c.candidate_id for c in await repo.list_attested(audited=False)]
+    out["by_identity"] = [c.candidate_id for c in await repo.list_attested(identity_id="other")]
+    out["attested_buckets"] = sorted((await repo.bucket_counts(_T, attested_only=True)).items())
+    out["by_state"] = await repo.count_by_state()
+    out["labeled"] = [c.candidate_id for c in await repo.list_labeled()]
+    # Unaudited and audited-wrong attestations purge with unlabeled rows; audited-correct stay.
+    out["purged"] = await repo.purge(_T + timedelta(days=2))
+    out["after_purge"] = await repo.count_by_state()
+    out["left"] = [c.candidate_id for c in await repo.list_attested()]
+    return out
+
+
+async def test_attested_rows_match_between_in_memory_and_postgres(pool: asyncpg.Pool) -> None:
+    postgres = await _exercise_attested(PostgresCalibrationCandidateRepository(pool))
+    in_memory = await _exercise_attested(InMemoryCalibrationCandidateRepository())
+    assert in_memory == postgres
+    ids = [_attested(i).candidate_id for i in range(1, 5)]
+    assert postgres["audit_correct"]["audit_verdict"] == "correct"
+    assert postgres["audit_unlabeled"] is None
+    assert postgres["queue"] == [_candidate(0).candidate_id]
+    assert postgres["attested_page"] == list(reversed(ids))
+    assert postgres["audited"] == ids[:2]
+    assert postgres["unaudited"] == ids[2:]
+    assert postgres["by_identity"] == []
+    assert postgres["by_state"] == {"unlabeled": 1, "labeled": 0, "rejected": 0, "attested": 4}
+    assert postgres["labeled"] == []
+    assert postgres["left"] == [ids[0]]
+    assert postgres["after_purge"] == {"unlabeled": 0, "labeled": 0, "rejected": 0, "attested": 1}
+
+
+async def test_database_enforces_attestation_completeness(pool: asyncpg.Pool) -> None:
+    repo = PostgresCalibrationCandidateRepository(pool)
+    # An attested row must be a sensor-attested member label with its association and grade.
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.insert(_attested(0, label_source="operator_reviewed"))
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.insert(_attested(1, attestation_grade=None))
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.insert(_attested(2, attestation_association_id=None))
+    # An audit verdict belongs only to an attested row and carries its auditor and time.
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.insert(_candidate(3, audit_verdict="correct", audited_by="op", audited_at=_T))
+    with pytest.raises(asyncpg.CheckViolationError):
+        await repo.insert(_attested(4, audit_verdict="correct"))
