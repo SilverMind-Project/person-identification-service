@@ -24,7 +24,8 @@ Never name cosine similarity `confidence`, `probability`, or `certainty`.
 
 ## Service contract
 
-Identification responses expose both `raw_similarity` and nullable `calibrated_confidence`, plus:
+Identification responses expose both `similarity` (or `raw_similarity` on `/match-template`) and
+nullable `calibrated_confidence`, plus:
 
 - calibration status and artifact version;
 - `recognizer_version` (canonical, with one-release `arcface_model_version` alias) and model profile;
@@ -32,11 +33,11 @@ Identification responses expose both `raw_similarity` and nullable `calibrated_c
 - recognition state;
 - face detection confidence separately.
 
-The deprecated face `confidence` field (a mirror of raw similarity) was removed on 2026-10-20;
+The deprecated face `confidence` field (a mirror of raw similarity) was removed on 2026-10-20, and
+the one-release `FaceDetection.raw_similarity` alias was removed on 2026-11-21;
 `tests/test_identification_geometry_contract.py` and
-`tests/test_confidence_contract_characterization.py` assert it stays absent. `similarity` is the
-documented match score; `raw_similarity` remains a computed alias of it for one release (see the
-engineering-standards skill's deprecation note).
+`tests/test_confidence_contract_characterization.py` assert both stay absent and `similarity`
+carries the raw cosine match score.
 
 Missing, invalid, corrupt, or incompatible calibration produces `calibrated_confidence=null` and a
 degraded health state. It never falls back to raw similarity.

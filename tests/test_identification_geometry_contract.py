@@ -111,8 +111,9 @@ def test_identify_batch_frames_carry_geometry_and_image_size(client: TestClient)
 
 
 def test_identify_face_json_has_no_confidence_key(client: TestClient) -> None:
-    # A face carries its match score as similarity (and the raw_similarity alias); the old
-    # "confidence" key, a mislabelled raw similarity, is gone from the wire contract.
+    # A face carries its raw cosine match score solely as similarity; both the old "confidence"
+    # key and the one-release "raw_similarity" alias are gone from the FaceDetection wire contract.
     [face] = client.post("/api/v1/identify", json={"image": _encoded_image()}).json()["faces"]
     assert "confidence" not in face
-    assert face["raw_similarity"] == face["similarity"] == pytest.approx(0.62)
+    assert "raw_similarity" not in face
+    assert face["similarity"] == pytest.approx(0.62)

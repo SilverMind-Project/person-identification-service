@@ -228,10 +228,10 @@ calibration_capture:
   # Attested faces stored per (quality decile, attested identity, camera) per UTC day.
   attestation_per_bucket_per_day: 40
 
-# Visitor clustering (identity-continuity M06)
+# Visitor clustering
 # Persists unmatched face embeddings, clusters them across visits, and lets a
 # caregiver name a recurring visitor (nurse, handyman) into a household member.
-# Only named clusters ever enter live tracking (D7).
+# Only explicitly named clusters ever enter enrollment and live tracking.
 visitors:
   clustering_enabled: true
   min_detection_score: 0.6

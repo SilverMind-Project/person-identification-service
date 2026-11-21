@@ -361,14 +361,14 @@ def test_face_detection_separates_raw_and_calibrated() -> None:
         preprocessing_version="v1",
     ).model_dump()
 
-    assert det["raw_similarity"] == 0.83
+    assert "raw_similarity" not in det
     assert det["similarity"] == 0.83
     assert det["calibrated_confidence"] == 0.72
     assert det["calibration_status"] == "ready"
     assert det["calibration_artifact_version"] == "test-v1"
     assert det["arcface_model_version"] == "buffalo_l"
-    # raw and calibrated are always distinct fields
-    assert det["raw_similarity"] != det["calibrated_confidence"]
+    # raw similarity and calibrated confidence are always distinct fields
+    assert det["similarity"] != det["calibrated_confidence"]
 
 
 def test_face_detection_calibrated_none_when_degraded() -> None:
@@ -382,7 +382,7 @@ def test_face_detection_calibrated_none_when_degraded() -> None:
 
     assert det["calibrated_confidence"] is None
     assert det["calibration_status"] == "degraded_missing"
-    assert det["raw_similarity"] == 0.75
+    assert det["similarity"] == 0.75
 
 
 def test_face_detection_raw_recognition_state_unaffected_by_calibration() -> None:

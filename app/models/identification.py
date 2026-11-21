@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FaceQualityModel(BaseModel):
@@ -131,12 +131,6 @@ class FaceDetection(BaseModel):
         elif self.arcface_model_version and not self.recognizer_version:
             self.recognizer_version = self.arcface_model_version
         return self
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def raw_similarity(self) -> float:
-        """Alias of ``similarity``, kept for one release for older consumers."""
-        return self.similarity
 
 
 class CaptureContext(BaseModel):

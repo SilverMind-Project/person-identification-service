@@ -20,8 +20,10 @@ def test_missing_calibration_exposes_null_calibrated_confidence() -> None:
         bbox=[10.0, 20.0, 110.0, 220.0],
     ).model_dump()
 
-    assert detection["raw_similarity"] == data["raw_similarity"]
-    # The baseline's raw-similarity "confidence" field was removed; similarity carries it.
+    assert detection["similarity"] == data["raw_similarity"]
+    # Legacy raw-similarity aliases ("confidence" and "raw_similarity") are absent; "similarity"
+    # is the sole raw cosine score on FaceDetection.
     assert "confidence" not in detection
+    assert "raw_similarity" not in detection
     assert detection["calibrated_confidence"] is None
     assert detection["calibration_status"] == data["target"]["calibration_status"]

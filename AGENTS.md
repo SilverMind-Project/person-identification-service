@@ -240,7 +240,7 @@ Key settings:
 | Setting | Env var | Default | Description |
 | --- | --- | --- | --- |
 | `face_engine.triton_url` | `TRITON_GRPC_URL` | `triton:8701` | Triton gRPC endpoint |
-| `face_engine.active_profile` | `PERSON_ID_RECOGNIZER_PROFILE` | `buffalo_l` | Active `RecognizerProfile` key under `face_engine.profiles` |
+| `face_engine.active_profile` | `FACE_RECOGNIZER_PROFILE` | `buffalo_l` | Active `RecognizerProfile` key under `face_engine.profiles` |
 | `face_engine.profiles` | -- | `buffalo_l`, `adaface_ir50_webface4m` | Named recognizer profiles (Triton models, alignment template, color space, normalization, tensor names, licence) |
 | `face_engine.model_profile` | `PERSON_ID_MODEL_PROFILE` | `full` | Health metadata |
 | `face_engine.triton_timeout_ms` | `TRITON_TIMEOUT_MS` | `30000` | Request timeout |
@@ -469,7 +469,7 @@ Enroll error handling:
 - `include_annotated_image`: bool (default false)
 - `save_guest_images`: bool (default false)
 
-Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` (the raw cosine match score, never a probability) and its one-release alias `raw_similarity`, nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
+Each `FaceDetection` carries `person_id`, `name`, `recognition_state`, `best_candidate_id`, `similarity` (the raw cosine match score, never a probability), nullable `calibrated_confidence` with `calibration_status` and version fields, head pose, `det_score`, and face geometry (`face_width_px`, `face_height_px`, nullable `interocular_px`). `IdentifyResponse` and each `FrameResult` carry `image_width_px` and `image_height_px` of the decoded input (0 for an undecodable batch frame).
 
 **Side effects:** every unknown face on either identify endpoint is offered to `VisitorStore.record_sighting` (gated by `visitors.clustering_enabled`), independent of `save_guest_images`. On `/identify` only, a request with a `capture_context` (sent by tracking-orchestrator) offers its faces to `CalibrationCaptureService` (gated by `calibration_capture.enabled`), which keeps a stratified sample as calibration candidates in a background worker, and, when the context names a `detection_id` and `calibration_capture.attestation_enabled` is on, holds them in memory for a later wearable attestation. Read-only measurement tools must call `FaceEngine` directly instead of these endpoints.
 

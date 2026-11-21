@@ -52,12 +52,11 @@ Rules:
   removed field goes through a deprecation window recorded in this skill, with every consumer
   (`continuous-tracking/tracking-orchestrator/app/inference/face_id_client.py`,
   `cognitive-companion/backend/integrations/person_id_client.py`) migrated in the same change set.
-- Name every similarity `similarity` or `raw_similarity`. Never name cosine similarity
-  `confidence`, `probability`, or `certainty`. The face `confidence` field was removed on
-  2026-10-20. Deprecation window open: `raw_similarity` is a computed alias of `similarity`, kept
-  for one release so older consumers keep working; both consumers already read `raw_similarity`
-  and fall back to `similarity`, so the alias can go in the next release that touches the
-  identify contract.
+- Name every similarity `similarity` (on `FaceDetection`) or `raw_similarity` (on
+  `MatchTemplateResponse`). Never name cosine similarity `confidence`, `probability`, or
+  `certainty`. The legacy face `confidence` field was removed on 2026-10-20, and the one-release
+  `FaceDetection.raw_similarity` computed alias was removed on 2026-11-21; both CTS and CC read
+  `similarity` directly on `/identify` and `/identify-batch`.
 - Every dimensional field carries its unit in the name: `_px`, `_deg`, `_s`.
 - Face geometry is part of the identify contract: each face carries `face_width_px`,
   `face_height_px`, and nullable `interocular_px` (distance between the two SCRFD eye keypoints,

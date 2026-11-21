@@ -609,6 +609,15 @@ class PostgresEnrollmentRepository:
                    WHERE attributed_person_id = $1""",
                 person_id,
             )
+            # Visitor clusters that created this member via naming reference members(person_id)
+            # with no delete action; dismiss them and clear named_person_id so deleting a
+            # named-visitor member succeeds without re-surfacing them as an unreviewed visitor.
+            await conn.execute(
+                """UPDATE visitor_clusters
+                   SET status = 'dismissed', named_person_id = NULL, updated_at = now()
+                   WHERE named_person_id = $1""",
+                person_id,
+            )
             # ON DELETE CASCADE removes the member's embeddings, face_prototypes, and centroids
             # across every recognizer_version.
             result = await conn.execute("DELETE FROM members WHERE person_id = $1", person_id)

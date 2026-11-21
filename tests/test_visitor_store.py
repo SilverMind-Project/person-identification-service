@@ -689,6 +689,16 @@ class TestReview:
             None,
         )
 
+    async def test_deleting_a_named_visitor_member_dismisses_the_cluster(self, store, pool):
+        cluster_id = await _sight(store, _embedding(115))
+        await store.name_cluster(cluster_id, "named-visitor", "Named Visitor")
+
+        removed = await PostgresEnrollmentRepository(pool).remove_member("named-visitor")
+
+        assert removed is True
+        [row] = await _cluster_rows(pool)
+        assert (row["status"], row["named_person_id"]) == ("dismissed", None)
+
 
 class TestClosedClusterRetention:
     async def test_old_sightings_of_a_closed_cluster_are_purged_but_it_keeps_absorbing(
