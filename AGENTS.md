@@ -34,7 +34,7 @@ Two characteristics make this service non-trivial:
 | Inference runtime | NVIDIA Triton Inference Server over gRPC |
 | Image processing | OpenCV (`opencv-python-headless`) |
 | Package manager | `uv` (`uv.lock` is committed) |
-| Lint and types | `ruff` (`E`, `F`, `I`, `W`, `UP`, `B`, `SIM`, `RUF`, `PIE`, `PT`, `C4`, `T20`; 100-char lines); `mypy` gradual typing over `app/` |
+| Lint and types | `ruff` (`E`, `F`, `I`, `I002`, `W`, `UP`, `B`, `BLE`, `DTZ`, `ASYNC`, `PGH`, `G`, `S608`, `TID`, `ERA`, `SIM`, `RUF`, `PIE`, `PT`, `C4`, `T20`; 100-char lines); `mypy` gradual typing over `app/` |
 
 **Logging is stdlib `logging.getLogger(__name__)` with `key=value` text, by design.** cognitive-companion uses its own `backend.core.logging` wrapper and continuous-tracking uses `structlog`; each choice is per project. Do not "fix" this service to match another repository.
 

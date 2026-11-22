@@ -135,13 +135,14 @@ its default. Comments never cite milestone or decision numbers.
   file. `0001_initial_schema` is frozen. Never edit
   an applied migration and never drop the database to apply a change: enrollment and visitor data
   are irreplaceable household data.
-- Write idempotent DDL (`IF NOT EXISTS`). Parameterized SQL only (`$1..$N`).
+- Write idempotent DDL (`IF NOT EXISTS`). Parameterized SQL only (`$1..$N`; ruff `S608`).
 
 ## Logging, metrics, privacy
 
-- stdlib `logging.getLogger(__name__)` with `key=value` message fields. Never `print`. This is a
-  deliberate per-project choice: cognitive-companion uses `backend.core.logging` and
-  continuous-tracking uses `structlog`. Do not convert this service to match them.
+- stdlib `logging.getLogger(__name__)` with `key=value` message fields; no f-strings in log calls
+  (ruff `G004`), never `print` (ruff `T20`). This is a deliberate per-project choice:
+  cognitive-companion uses `backend.core.logging` and continuous-tracking uses `structlog`. Do not
+  convert this service to match them.
 - Never log base64 images, embeddings, member names, or crop bytes.
 - Prometheus metrics use the default registry and are exposed at `/metrics`. Label values must
   be bounded (states, reasons), never person ids.
@@ -153,8 +154,12 @@ its default. Comments never cite milestone or decision numbers.
 - Model or Triton failure on a request is an HTTP error with a structured detail; never a
   silent empty result that looks like "no face".
 - Background loops catch, log with `logger.exception`, and continue; they never die silently.
-- No bare `except:`; a broad `except Exception` must log and must not swallow programmer errors
-  in tests.
+- Narrow exceptions by default; broad `except Exception` requires a per-site `# noqa: BLE001`
+  with a reason (ruff `BLE001`).
+- Timezone-aware datetimes only (ruff `DTZ`), no blocking I/O in async code (ruff `ASYNC`),
+  specific `type: ignore[code]` comments (ruff `PGH003`), absolute imports only (ruff `TID252`,
+  except `__init__.py` re-exports), `from __future__ import annotations` in every file (ruff
+  `I002`), and no commented-out code (ruff `ERA001`).
 
 ## Testing
 

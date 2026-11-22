@@ -55,15 +55,25 @@ allow-direct-references = true
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+extend-exclude = ["tests/fixtures/lint_canary"]
 
 [tool.ruff.lint]
 select = [
     "E",     # pycodestyle errors
     "F",     # pyflakes (includes unused imports, undefined names)
     "I",     # isort
+    "I002",  # require `from __future__ import annotations`
     "W",     # pycodestyle warnings
     "UP",    # pyupgrade — modernize syntax
     "B",     # flake8-bugbear — common bug patterns
+    "BLE",   # flake8-blind-except — require narrow exceptions or justified noqa
+    "DTZ",   # flake8-datetimez — timezone-aware datetimes only
+    "ASYNC", # flake8-async — no blocking calls in async code
+    "PGH",   # pygrep-hooks — specific type: ignore codes
+    "G",     # flake8-logging-format — no f-strings in log calls
+    "S608",  # flake8-bandit — parameterized SQL only
+    "TID",   # flake8-tidy-imports — absolute imports only
+    "ERA",   # eradicate — no commented-out code
     "SIM",   # flake8-simplify
     "TCH",   # flake8-type-checking — move type-only imports behind TYPE_CHECKING
     "RUF",   # ruff-specific rules
@@ -82,8 +92,15 @@ ignore = [
     "TC",      # type-checking imports (older alias)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["TID252"]  # package re-export blocks may use relative imports
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+required-imports = ["from __future__ import annotations"]
 
 # ── Mypy ─────────────────────────────────────────────────────────
 [tool.mypy]

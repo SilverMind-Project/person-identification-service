@@ -664,7 +664,7 @@ class VisitorStore:
                 for r in crop_rows:
                     try:
                         self._minio.delete_object(r["crop_object"])
-                    except Exception:
+                    except Exception:  # noqa: BLE001  # best-effort MinIO crop cleanup during retention purge
                         logger.warning(
                             "Failed to delete visitor crop during purge: %s", r["crop_object"]
                         )
@@ -701,7 +701,7 @@ class VisitorStore:
                 continue
             try:
                 self._minio.delete_object(r["crop_object"])
-            except Exception:
+            except Exception:  # noqa: BLE001  # best-effort MinIO crop cleanup during retention purge
                 logger.warning("Failed to delete visitor crop during purge: %s", r["crop_object"])
         return len(rows)
 

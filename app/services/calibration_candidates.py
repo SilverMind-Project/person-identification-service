@@ -223,21 +223,21 @@ _COLUMNS = """candidate_id, captured_at, camera_id, source, crop_object_key, emb
 
 _SQL_INSERT = f"""INSERT INTO calibration_candidates ({_COLUMNS})
 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15,
-        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)"""
+        $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)"""  # noqa: S608  # _COLUMNS is a module constant; all values are $N params
 
-_SQL_SELECT = f"SELECT {_COLUMNS} FROM calibration_candidates"
+_SQL_SELECT = f"SELECT {_COLUMNS} FROM calibration_candidates"  # noqa: S608  # _COLUMNS is a module constant
 
 _SQL_LABEL = f"""UPDATE calibration_candidates
 SET label_state = 'labeled', label_kind = $2, label_identity_id = $3, label_source = $4,
     labeled_by = $5, labeled_at = $6
 WHERE candidate_id = $1::uuid
-RETURNING {_COLUMNS}"""
+RETURNING {_COLUMNS}"""  # noqa: S608  # _COLUMNS is a module constant; all values are $N params
 
 _SQL_REJECT = f"""UPDATE calibration_candidates
 SET label_state = 'rejected', label_kind = NULL, label_identity_id = NULL, label_source = NULL,
     labeled_by = NULL, labeled_at = NULL
 WHERE candidate_id = $1::uuid
-RETURNING {_COLUMNS}"""
+RETURNING {_COLUMNS}"""  # noqa: S608  # _COLUMNS is a module constant; all values are $N params
 
 
 def _from_row(row: asyncpg.Record) -> CalibrationCandidate:
@@ -515,7 +515,7 @@ class PostgresCalibrationCandidateRepository:
                 WHERE candidate_id = $1::uuid
                   AND label_state = 'attested'
                   AND revoked_at IS NULL
-                RETURNING {_COLUMNS}""",
+                RETURNING {_COLUMNS}""",  # noqa: S608  # _COLUMNS is a module constant; all values are $N params
                 candidate_id,
                 verdict,
                 audited_by,
