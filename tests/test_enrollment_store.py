@@ -25,7 +25,7 @@ async def _can_connect() -> bool:
         conn = await asyncpg.connect(TEST_DSN, timeout=5)
         await conn.close()
         return True
-    except Exception:
+    except (OSError, TimeoutError, asyncpg.PostgresError, asyncpg.InterfaceError):
         return False
 
 

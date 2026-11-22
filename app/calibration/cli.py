@@ -169,7 +169,7 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         artifact = parse_artifact(raw)
-    except Exception as exc:
+    except (OSError, ValueError, TypeError) as exc:
         print(f"FAIL: could not parse artifact: {exc}")
         return 1
 

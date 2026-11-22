@@ -110,13 +110,13 @@ class CalibrationEvaluator:
 
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             logger.warning("calibration_artifact_unreadable path=%s error=%s", p, exc)
             return cls(None, "degraded_invalid", f"read error: {exc}")
 
         try:
             artifact = parse_artifact(raw)
-        except Exception as exc:
+        except (ValueError, TypeError) as exc:
             logger.warning("calibration_artifact_schema_invalid path=%s error=%s", p, exc)
             return cls(None, "degraded_invalid", f"schema validation failed: {exc}")
 
@@ -191,7 +191,7 @@ class CalibrationEvaluator:
             return _apply(artifact, features)
         except KeyError:
             return None
-        except Exception as exc:
+        except (ValueError, TypeError, ArithmeticError, IndexError) as exc:
             logger.error("calibration_predict_error error=%s", exc)
             return None
 
