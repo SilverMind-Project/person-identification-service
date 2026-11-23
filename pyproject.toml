@@ -17,19 +17,19 @@ dependencies = [
     "python-multipart>=0.0.9",
     "asyncpg>=0.30",
     # pgvector 0.5 changed asyncpg's register_vector return type from ndarray to Vector.
-    "pgvector>=0.3,<0.5",
+    "pgvector>=0.3,<0.6",
     "boto3>=1.35",
     "prometheus-client>=0.21",
 ]
 
 [project.optional-dependencies]
 model-tools = [
-    "insightface==0.7.3",
-    "scikit-image<0.26.0",
+    "insightface==2.1",
+    "scikit-image<0.27.0",
     "onnxruntime>=1.24",
 ]
 calibration-tools = [
-    "scikit-learn>=1.5,<1.7",
+    "scikit-learn>=1.5,<1.10",
     "matplotlib>=3.8",
     # Spearman rank correlation for scripts/calibrate_face_quality.py.
     "scipy>=1.11",
